@@ -100,7 +100,7 @@ class InferenceEngine:
             try:
                 self.process.stdin.write(b"0\n")
                 await self.process.stdin.drain()
-                await asyncio.wait_for(self.process.wait(), timeout=10)
+                await asyncio.wait_for(self.process.wait(), timeout=300)
             except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError, OSError):
                 self.process.kill()
                 await self.process.wait()
