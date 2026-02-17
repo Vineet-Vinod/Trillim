@@ -13,20 +13,6 @@ transformers
 
 --------------------------------------------------------------------------------
 
-torch (PyTorch)
-  License:   BSD 3-Clause License
-  Copyright: Copyright (c) 2016 Facebook, Inc. (Meta Platforms, Inc.)
-  URL:       https://github.com/pytorch/pytorch
-
---------------------------------------------------------------------------------
-
-accelerate
-  License:   Apache License 2.0
-  Copyright: Copyright 2022 The HuggingFace Team
-  URL:       https://github.com/huggingface/accelerate
-
---------------------------------------------------------------------------------
-
 huggingface_hub
   License:   Apache License 2.0
   Copyright: Copyright 2021 The Hugging Face team
