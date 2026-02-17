@@ -282,17 +282,10 @@ class LLM(Component):
                 message=f"config.json not found in {model_dir}",
             )
 
-        # Stop the old engine
-        if self.engine is not None:
-            async with self.engine.lock:
-                await self.engine.stop()
-            self.engine = None
-
-        # Validate LoRA adapter if requested
+        # Validate LoRA adapter before stopping the old engine
         if resolved_adapter:
             trillim_cfg_path = os.path.join(resolved_adapter, "trillim_config.json")
             if not os.path.exists(trillim_cfg_path):
-                self.state = ServerState.NO_MODEL
                 return LoadModelResponse(
                     status="error",
                     model=self.model_name,
@@ -303,7 +296,6 @@ class LLM(Component):
                 )
             lora_path = os.path.join(resolved_adapter, "qmodel.lora")
             if not os.path.exists(lora_path):
-                self.state = ServerState.NO_MODEL
                 return LoadModelResponse(
                     status="error",
                     model=self.model_name,
@@ -312,20 +304,26 @@ class LLM(Component):
                     f"Run: trillim quantize <model_dir> --adapter {resolved_adapter}",
                 )
 
-        # Load new tokenizer, config, and params
+        # Load new tokenizer, config, and params before stopping the old engine
+        # so a failure here doesn't leave the server with no model running
         try:
             tokenizer = load_tokenizer(model_dir, adapter_dir=resolved_adapter, trust_remote_code=self._trust_remote_code)
             arch_config = ArchConfig.from_config_json(config_path, model_dir, adapter_dir=resolved_adapter)
             stop_tokens = set(arch_config.eos_tokens)
             default_params = load_default_params(model_dir)
         except Exception as exc:
-            self.state = ServerState.NO_MODEL
             return LoadModelResponse(
                 status="error",
                 model=self.model_name,
                 recompiled=False,
                 message=f"Failed to load model config: {exc}",
             )
+
+        # Stop the old engine only after everything above succeeded
+        if self.engine is not None:
+            async with self.engine.lock:
+                await self.engine.stop()
+            self.engine = None
 
         # Start new engine
         threads = num_threads if num_threads is not None else self._num_threads
