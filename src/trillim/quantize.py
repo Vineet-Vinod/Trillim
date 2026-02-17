@@ -433,6 +433,10 @@ def _build_lora_entries(adapter_dir, config, shard_path_list, shard_idx_map,
                         shard_headers, shard_data_starts):
     """Build LoRA manifest entries from adapter directory."""
     adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
+    if not os.path.exists(adapter_config_path):
+        raise FileNotFoundError(
+            f"No adapter_config.json found in {adapter_config_path}"
+        )
     with open(adapter_config_path) as f:
         adapter_config = json.load(f)
 
