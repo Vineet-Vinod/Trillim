@@ -192,18 +192,28 @@ def main():
     config_path = os.path.join(MODEL_PATH, "config.json")
 
     if ADAPTER_DIR:
+        trillim_cfg_path = os.path.join(ADAPTER_DIR, "trillim_config.json")
+        if not os.path.exists(trillim_cfg_path):
+            print(
+                f"Error: {trillim_cfg_path} not found.\n"
+                "This adapter has not been quantized for Trillim.\n"
+                "Run: trillim quantize <model_dir> --adapter "
+                f"{ADAPTER_DIR}"
+            )
+            sys.exit(1)
         lora_path = os.path.join(ADAPTER_DIR, "qmodel.lora")
         if not os.path.exists(lora_path):
             print(
                 f"Error: --lora set but {lora_path} not found. "
-                "Run 'make generate MODEL_DIR=<path> ADAPTER_DIR=<path>' first."
+                "Run: trillim quantize <model_dir> --adapter "
+                f"{ADAPTER_DIR}"
             )
             sys.exit(1)
 
     try:
         tokenizer = load_tokenizer(MODEL_PATH, adapter_dir=ADAPTER_DIR, trust_remote_code=TRUST_REMOTE_CODE)
 
-        arch_config = ArchConfig.from_config_json(config_path, MODEL_PATH)
+        arch_config = ArchConfig.from_config_json(config_path, MODEL_PATH, adapter_dir=ADAPTER_DIR)
         stop_tokens = set(arch_config.eos_tokens)
 
         from trillim._bin_path import inference_bin

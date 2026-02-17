@@ -521,7 +521,8 @@ def _find_quantize_binary():
     return quantize_bin()
 
 
-def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None):
+def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
+                       adapter_output_dir=None):
     """Invoke the C++ quantizer to produce qmodel.tensors, rope.cache, and/or qmodel.lora."""
     print("  Writing binary manifest...")
     manifest_path = write_manifest(model_dir, config, adapter_dir=adapter_dir)
@@ -558,13 +559,15 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None):
 
     # LoRA args
     if adapter_dir:
+        if not adapter_output_dir:
+            raise ValueError("adapter_output_dir is required when adapter_dir is set")
         adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
         with open(adapter_config_path) as f:
             adapter_config = json.load(f)
         rank = adapter_config["r"]
 
         cmd += [
-            "--lora-output", os.path.join(model_dir, "qmodel.lora"),
+            "--lora-output", os.path.join(adapter_output_dir, "qmodel.lora"),
             "--lora-rank", str(rank),
             "--num-heads", str(config.num_heads),
             "--num-kv-heads", str(config.num_kv_heads),
@@ -580,7 +583,8 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None):
     os.remove(manifest_path)
 
 
-def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir):
+def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir,
+                       adapter_output_dir):
     """Invoke the C++ quantizer for LoRA-only extraction (no model tensors)."""
     print("  Writing LoRA manifest...")
     manifest_path = write_manifest(model_dir, config, adapter_dir=adapter_dir, skip_model=True)
@@ -608,7 +612,7 @@ def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir):
             "--intermediate-dim-orig", str(config.intermediate_dim_orig),
             "--norm-eps", str(config.norm_eps),
             "--head-dim", str(config.head_dim),
-            "--lora-output", os.path.join(model_dir, "qmodel.lora"),
+            "--lora-output", os.path.join(adapter_output_dir, "qmodel.lora"),
             "--lora-rank", str(rank),
             "--num-heads", str(config.num_heads),
             "--num-kv-heads", str(config.num_kv_heads),
@@ -629,8 +633,8 @@ def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir):
                 os.remove(path)
 
 
-def _copy_adapter_tokenizer_files(adapter_dir, model_dir):
-    """Copy tokenizer override files from adapter directory to model directory."""
+def _copy_adapter_tokenizer_files(adapter_dir, output_dir):
+    """Copy tokenizer override files from adapter directory to output directory."""
     adapter_tokenizer_config = os.path.join(adapter_dir, "tokenizer_config.json")
     if os.path.exists(adapter_tokenizer_config):
         with open(adapter_tokenizer_config) as f:
@@ -646,7 +650,7 @@ def _copy_adapter_tokenizer_files(adapter_dir, model_dir):
             k: adapter_tok_cfg[k] for k in override_fields if k in adapter_tok_cfg
         }
         if overrides:
-            override_path = os.path.join(model_dir, "lora_tokenizer_config.json")
+            override_path = os.path.join(output_dir, "lora_tokenizer_config.json")
             with open(override_path, "w") as f:
                 json.dump(overrides, f, indent=2)
             print(f"  Saved tokenizer overrides: {override_path}")
@@ -656,15 +660,55 @@ def _copy_adapter_tokenizer_files(adapter_dir, model_dir):
 
     adapter_chat_template = os.path.join(adapter_dir, "chat_template.jinja")
     if os.path.exists(adapter_chat_template):
-        dest_path = os.path.join(model_dir, "lora_chat_template.jinja")
+        dest_path = os.path.join(output_dir, "lora_chat_template.jinja")
         shutil.copy(adapter_chat_template, dest_path)
         print(f"  Copied chat template: {dest_path}")
 
     adapter_tokenizer = os.path.join(adapter_dir, "tokenizer.json")
     if os.path.exists(adapter_tokenizer):
-        dest_path = os.path.join(model_dir, "lora_tokenizer.json")
+        dest_path = os.path.join(output_dir, "lora_tokenizer.json")
         shutil.copy(adapter_tokenizer, dest_path)
         print(f"  Copied tokenizer: {dest_path}")
+
+
+def _make_adapter_output_dir(adapter_dir):
+    """Create a -TRNQ output directory for the quantized adapter.
+
+    Takes the adapter directory name, appends -TRNQ, and creates it as a
+    sibling directory.  Returns the absolute path.
+    """
+    adapter_dir = os.path.abspath(adapter_dir)
+    base = adapter_dir.rstrip("/")
+    output_dir = base + "-TRNQ"
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _write_trillim_adapter_config(output_dir, config, adapter_dir):
+    """Write trillim_config.json into the quantized adapter output directory."""
+    # Try to read source_model from the base model's config.json
+    source_model = ""
+    adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
+    if os.path.exists(adapter_config_path):
+        with open(adapter_config_path) as f:
+            acfg = json.load(f)
+        source_model = acfg.get("base_model_name_or_path", "")
+
+    trillim_cfg = {
+        "trillim_version": "0.1.0",
+        "format_version": 1,
+        "type": "lora_adapter",
+        "quantization": "ternary",
+        "source_model": source_model,
+        "architecture": config.arch_type.name.lower(),
+        "platforms": ["x86_64", "aarch64"],
+    }
+
+    cfg_path = os.path.join(output_dir, "trillim_config.json")
+    with open(cfg_path, "w") as f:
+        json.dump(trillim_cfg, f, indent=2)
+        f.write("\n")
+    print(f"  Written: {cfg_path}")
 
 
 def main():
@@ -682,7 +726,7 @@ def main():
     )
     parser.add_argument(
         "--adapter",
-        help="Extract LoRA adapter from PEFT directory → qmodel.lora",
+        help="Extract LoRA adapter from PEFT directory → <adapter_dir>-TRNQ/",
     )
     args = parser.parse_args()
 
@@ -714,11 +758,15 @@ def main():
     print(f"  Num layers: {config.num_layers}")
     print(f"  Num heads: {config.num_heads}")
 
+    # Set up adapter output directory
+    adapter_output_dir = None
     if args.adapter:
         adapter_dir = args.adapter
         if not os.path.isdir(adapter_dir):
             print(f"Error: adapter directory not found: {adapter_dir}")
             sys.exit(1)
+        adapter_output_dir = _make_adapter_output_dir(adapter_dir)
+        print(f"\n  Adapter output: {adapter_output_dir}")
 
     if args.model:
         # Quantize model weights (+ LoRA if adapter provided)
@@ -729,6 +777,7 @@ def main():
         _run_cpp_quantizer(
             binary_path, model_dir, config,
             adapter_dir=args.adapter if args.adapter else None,
+            adapter_output_dir=adapter_output_dir,
         )
 
         qmodel_path = os.path.join(model_dir, "qmodel.tensors")
@@ -737,7 +786,7 @@ def main():
         print(f"  Written: {rope_path}")
 
         if args.adapter:
-            lora_path = os.path.join(model_dir, "qmodel.lora")
+            lora_path = os.path.join(adapter_output_dir, "qmodel.lora")
             print(f"  Written: {lora_path}")
 
     elif args.adapter:
@@ -746,17 +795,24 @@ def main():
         print("Extracting LoRA adapter...")
         print("-" * 60)
 
-        _run_cpp_lora_only(binary_path, model_dir, config, args.adapter)
+        _run_cpp_lora_only(
+            binary_path, model_dir, config, args.adapter,
+            adapter_output_dir=adapter_output_dir,
+        )
 
-        lora_path = os.path.join(model_dir, "qmodel.lora")
+        lora_path = os.path.join(adapter_output_dir, "qmodel.lora")
         print(f"\n  Written: {lora_path}")
 
-    # Copy tokenizer files from adapter (if applicable)
+    # Copy tokenizer files and write trillim_config.json to output dir
     if args.adapter:
-        _copy_adapter_tokenizer_files(args.adapter, model_dir)
+        _copy_adapter_tokenizer_files(args.adapter, adapter_output_dir)
+        _write_trillim_adapter_config(adapter_output_dir, config, args.adapter)
 
     print("\n" + "=" * 60)
     print("Done!")
+    if adapter_output_dir:
+        print(f"\nQuantized adapter ready at: {adapter_output_dir}")
+        print(f"Usage: trillim chat {model_dir} --lora {adapter_output_dir}")
     print("=" * 60)
 
 

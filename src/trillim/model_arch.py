@@ -153,7 +153,8 @@ class ModelConfig:
 
     @classmethod
     def from_config_json(
-        cls, config_path: str, model_dir: Optional[str] = None
+        cls, config_path: str, model_dir: Optional[str] = None,
+        adapter_dir: Optional[str] = None,
     ) -> "ModelConfig":
         """Parse config.json and extract model configuration."""
         with open(config_path) as f:
@@ -365,9 +366,9 @@ class ModelConfig:
                     pass
 
         # Also collect stop tokens from LoRA adapter files if present
-        if model_dir:
+        if adapter_dir:
             # Check lora_tokenizer.json for stop tokens
-            lora_tokenizer_path = os.path.join(model_dir, "lora_tokenizer.json")
+            lora_tokenizer_path = os.path.join(adapter_dir, "lora_tokenizer.json")
             if os.path.exists(lora_tokenizer_path):
                 try:
                     with open(lora_tokenizer_path) as f:
@@ -386,7 +387,7 @@ class ModelConfig:
                     pass
 
             # Check lora_tokenizer_config.json for eos_token override
-            lora_tok_cfg_path = os.path.join(model_dir, "lora_tokenizer_config.json")
+            lora_tok_cfg_path = os.path.join(adapter_dir, "lora_tokenizer_config.json")
             if os.path.exists(lora_tok_cfg_path):
                 try:
                     with open(lora_tok_cfg_path) as f:

@@ -63,11 +63,18 @@ class InferenceEngine:
         from trillim.inference import _config_args
 
         if self.adapter_dir:
+            trillim_cfg_path = os.path.join(self.adapter_dir, "trillim_config.json")
+            if not os.path.exists(trillim_cfg_path):
+                raise RuntimeError(
+                    f"{trillim_cfg_path} not found. "
+                    "This adapter has not been quantized for Trillim. "
+                    f"Run: trillim quantize <model_dir> --adapter {self.adapter_dir}"
+                )
             lora_path = os.path.join(self.adapter_dir, "qmodel.lora")
             if not os.path.exists(lora_path):
                 raise RuntimeError(
                     f"--lora set but {lora_path} not found. "
-                    "Run 'trillim pull <model>' to download pre-built artifacts."
+                    f"Run: trillim quantize <model_dir> --adapter {self.adapter_dir}"
                 )
 
         from trillim._bin_path import inference_bin
@@ -228,7 +235,7 @@ class LLM(Component):
         config_path = os.path.join(self._model_dir, "config.json")
 
         tokenizer = load_tokenizer(self._model_dir, adapter_dir=self._adapter_dir, trust_remote_code=self._trust_remote_code)
-        arch_config = ArchConfig.from_config_json(config_path, self._model_dir)
+        arch_config = ArchConfig.from_config_json(config_path, self._model_dir, adapter_dir=self._adapter_dir)
         stop_tokens = set(arch_config.eos_tokens)
         default_params = load_default_params(self._model_dir)
 
@@ -297,7 +304,7 @@ class LLM(Component):
         # Load new tokenizer, config, and params
         try:
             tokenizer = load_tokenizer(model_dir, adapter_dir=resolved_adapter, trust_remote_code=self._trust_remote_code)
-            arch_config = ArchConfig.from_config_json(config_path, model_dir)
+            arch_config = ArchConfig.from_config_json(config_path, model_dir, adapter_dir=resolved_adapter)
             stop_tokens = set(arch_config.eos_tokens)
             default_params = load_default_params(model_dir)
         except Exception as exc:
