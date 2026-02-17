@@ -236,7 +236,6 @@ def main():
         tokenizer = load_tokenizer(MODEL_PATH, adapter_dir=ADAPTER_DIR, trust_remote_code=TRUST_REMOTE_CODE)
 
         arch_config = ArchConfig.from_config_json(config_path, MODEL_PATH, adapter_dir=ADAPTER_DIR)
-        stop_tokens = set(arch_config.eos_tokens)
 
         from trillim._bin_path import inference_bin
 
@@ -252,142 +251,16 @@ def main():
             bufsize=1,
         )
 
-        max_context = arch_config.max_position_embeddings
-        has_chat_template = (
-            hasattr(tokenizer, "chat_template") and tokenizer.chat_template
-        )
-        messages = []
-        cached_token_ids = []
-        cached_prompt_str = ""
-
-        MODEL_NAME = MODEL_PATH[MODEL_PATH.rfind('/')+1:]
-        print(f"Talk to {MODEL_NAME} (Ctrl+D or 'q' to quit, '/new' for new conversation)")
-        while True:
-            try:
-                query = better_input("> ")
-            except (EOFError, KeyboardInterrupt):
-                query = "q"
-
-            if query.strip() == "q":
-                model.stdin.write("0\n")
-                model.stdin.flush()
-                break
-
-            if query.strip() == "/new":
-                messages = []
-                cached_token_ids = []
-                cached_prompt_str = ""
-                print("Starting new conversation.")
-                continue
-
-            messages.append({"role": "user", "content": query})
-
-            if has_chat_template:
-                new_prompt = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-                if cached_prompt_str:
-                    # Incremental: only encode the new suffix
-                    suffix_str = new_prompt[len(cached_prompt_str) :]
-                    delta_tokens = tokenizer.encode(
-                        suffix_str, add_special_tokens=False
-                    )
-                    all_token_ids = cached_token_ids + delta_tokens
-                    reset_flag = 0
-                else:
-                    # First turn or after reset: encode full prompt
-                    all_token_ids = tokenizer.encode(
-                        new_prompt, add_special_tokens=False
-                    )
-                    delta_tokens = all_token_ids
-                    reset_flag = 1
-            else:
-                all_token_ids = tokenizer.encode(query)
-                delta_tokens = all_token_ids
-                reset_flag = 1
-
-            # Context limit check
-            if len(all_token_ids) >= max_context:
-                print(
-                    f"Context window full ({max_context} tokens). Starting new conversation."
-                )
-                messages = [messages[-1]]
-                cached_token_ids = []
-                cached_prompt_str = ""
-                if has_chat_template:
-                    new_prompt = tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
-                    )
-                    all_token_ids = tokenizer.encode(
-                        new_prompt, add_special_tokens=False
-                    )
-                else:
-                    all_token_ids = tokenizer.encode(query)
-                delta_tokens = all_token_ids
-                reset_flag = 1
-
-            # Send protocol: num_tokens, reset_flag, sampling params, token IDs
-            model.stdin.write(f"{len(delta_tokens)}\n")
-            model.stdin.write(f"{reset_flag}\n")
-            model.stdin.flush()
-
-            # temperature top_k top_p repetition_penalty rep_penalty_lookback max_tokens
-            model.stdin.write("0.6\n50\n0.9\n1.1\n64\n0\n")
-            model.stdin.flush()
-
-            for tok in delta_tokens:
-                model.stdin.write(f"{tok}\n")
-                model.stdin.flush()
-
-            print("Model Response: ", end="", flush=True)
-            decoder = IncrementalDecoder(tokenizer)
-            generated_tokens = []
-            response_text = ""
-            while True:
-                out = _readline_with_timeout(model.stdout, _ENGINE_TIMEOUT)
-                if out is None:
-                    model.kill()
-                    print(f"\nError: Inference engine timed out after {_ENGINE_TIMEOUT}s.")
-                    sys.exit(1)
-                if not out:
-                    break
+        try:
+            _run_chat_loop(model, tokenizer, arch_config)
+        finally:
+            if model.returncode is None:
+                model.terminate()
                 try:
-                    token = int(out.strip())
-                except ValueError:
+                    model.wait(timeout=10)
+                except subprocess.TimeoutExpired:
                     model.kill()
-                    print(f"\nError: Protocol error — expected int token_id, got {out.strip()!r}")
-                    sys.exit(1)
-                if token in stop_tokens:
-                    generated_tokens.append(token)
-                    break
-
-                generated_tokens.append(token)
-                new_text = decoder.decode(token)
-                response_text += new_text
-                print(new_text, end="", flush=True)
-            print()
-
-            # Read kv_position line
-            kv_line = _readline_with_timeout(model.stdout, _ENGINE_TIMEOUT)
-            if kv_line is None:
-                model.kill()
-                print(f"\nError: Inference engine timed out after {_ENGINE_TIMEOUT}s.")
-                sys.exit(1)
-            if kv_line:
-                try:
-                    kv_position = int(kv_line.strip())
-                except ValueError:
-                    model.kill()
-                    print(f"\nError: Protocol error — expected int kv_position, got {kv_line.strip()!r}")
-                    sys.exit(1)
-                cached_token_ids = (all_token_ids + generated_tokens)[:kv_position]
-
-            # Update cached prompt string and message history
-            messages.append({"role": "assistant", "content": response_text})
-            if has_chat_template:
-                cached_prompt_str = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=False
-                )
+                    model.wait()
 
     except BrokenPipeError:
         stderr = ""
@@ -401,6 +274,147 @@ def main():
         print("\nIf you think the engine is broken, please report the bug!")
     except Exception as e:
         print(f"\nAn error occurred: {e}")
+
+
+def _run_chat_loop(model, tokenizer, arch_config):
+    """Run the interactive chat loop against a running inference subprocess."""
+    stop_tokens = set(arch_config.eos_tokens)
+    max_context = arch_config.max_position_embeddings
+    has_chat_template = (
+        hasattr(tokenizer, "chat_template") and tokenizer.chat_template
+    )
+    messages = []
+    cached_token_ids = []
+    cached_prompt_str = ""
+
+    model_name = os.path.basename(os.path.normpath(model.args[1]))
+    print(f"Talk to {model_name} (Ctrl+D or 'q' to quit, '/new' for new conversation)")
+    while True:
+        try:
+            query = better_input("> ")
+        except (EOFError, KeyboardInterrupt):
+            query = "q"
+
+        if query.strip() == "q":
+            model.stdin.write("0\n")
+            model.stdin.flush()
+            break
+
+        if query.strip() == "/new":
+            messages = []
+            cached_token_ids = []
+            cached_prompt_str = ""
+            print("Starting new conversation.")
+            continue
+
+        messages.append({"role": "user", "content": query})
+
+        if has_chat_template:
+            new_prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            if cached_prompt_str:
+                # Incremental: only encode the new suffix
+                suffix_str = new_prompt[len(cached_prompt_str):]
+                delta_tokens = tokenizer.encode(
+                    suffix_str, add_special_tokens=False
+                )
+                all_token_ids = cached_token_ids + delta_tokens
+                reset_flag = 0
+            else:
+                # First turn or after reset: encode full prompt
+                all_token_ids = tokenizer.encode(
+                    new_prompt, add_special_tokens=False
+                )
+                delta_tokens = all_token_ids
+                reset_flag = 1
+        else:
+            all_token_ids = tokenizer.encode(query)
+            delta_tokens = all_token_ids
+            reset_flag = 1
+
+        # Context limit check
+        if len(all_token_ids) >= max_context:
+            print(
+                f"Context window full ({max_context} tokens). Starting new conversation."
+            )
+            messages = [messages[-1]]
+            cached_token_ids = []
+            cached_prompt_str = ""
+            if has_chat_template:
+                new_prompt = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                all_token_ids = tokenizer.encode(
+                    new_prompt, add_special_tokens=False
+                )
+            else:
+                all_token_ids = tokenizer.encode(query)
+            delta_tokens = all_token_ids
+            reset_flag = 1
+
+        # Send protocol: num_tokens, reset_flag, sampling params, token IDs
+        model.stdin.write(f"{len(delta_tokens)}\n")
+        model.stdin.write(f"{reset_flag}\n")
+        model.stdin.flush()
+
+        # temperature top_k top_p repetition_penalty rep_penalty_lookback max_tokens
+        model.stdin.write("0.6\n50\n0.9\n1.1\n64\n0\n")
+        model.stdin.flush()
+
+        for tok in delta_tokens:
+            model.stdin.write(f"{tok}\n")
+            model.stdin.flush()
+
+        print("Model Response: ", end="", flush=True)
+        decoder = IncrementalDecoder(tokenizer)
+        generated_tokens = []
+        response_text = ""
+        while True:
+            out = _readline_with_timeout(model.stdout, _ENGINE_TIMEOUT)
+            if out is None:
+                raise RuntimeError(
+                    f"Inference engine timed out after {_ENGINE_TIMEOUT}s"
+                )
+            if not out:
+                break
+            try:
+                token = int(out.strip())
+            except ValueError:
+                raise RuntimeError(
+                    f"Protocol error — expected int token_id, got {out.strip()!r}"
+                )
+            if token in stop_tokens:
+                generated_tokens.append(token)
+                break
+
+            generated_tokens.append(token)
+            new_text = decoder.decode(token)
+            response_text += new_text
+            print(new_text, end="", flush=True)
+        print()
+
+        # Read kv_position line
+        kv_line = _readline_with_timeout(model.stdout, _ENGINE_TIMEOUT)
+        if kv_line is None:
+            raise RuntimeError(
+                f"Inference engine timed out after {_ENGINE_TIMEOUT}s"
+            )
+        if kv_line:
+            try:
+                kv_position = int(kv_line.strip())
+            except ValueError:
+                raise RuntimeError(
+                    f"Protocol error — expected int kv_position, got {kv_line.strip()!r}"
+                )
+            cached_token_ids = (all_token_ids + generated_tokens)[:kv_position]
+
+        # Update cached prompt string and message history
+        messages.append({"role": "assistant", "content": response_text})
+        if has_chat_template:
+            cached_prompt_str = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
 
 
 if __name__ == "__main__":
