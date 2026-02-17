@@ -9,7 +9,9 @@ _BIN_DIR = os.path.join(os.path.dirname(__file__), "_bin")
 
 def _resolve(name: str) -> str:
     path = os.path.join(_BIN_DIR, name)
-    if os.path.isfile(path) and os.access(path, os.X_OK):
+    if os.path.isfile(path):
+        if not os.access(path, os.X_OK):
+            os.chmod(path, os.stat(path).st_mode | 0o111)
         return path
     if not os.listdir(_BIN_DIR) or os.listdir(_BIN_DIR) == [".gitkeep"]:
         raise RuntimeError(
