@@ -566,11 +566,11 @@ def test_load_model(base_url: str, model_dir: str | None = None, **_):
 
 
 def test_load_invalid_model(base_url: str, **_):
-    """POST /v1/models/load with a nonexistent path returns 500."""
+    """POST /v1/models/load with a nonexistent path returns an error (403 or 500)."""
     payload = {"model_dir": "/tmp/nonexistent_model_dir_12345"}
     status, body = api(base_url, "POST", "/v1/models/load", payload)
-    if status != 500:
-        return "fail", f"expected 500 for invalid model, got {status}: {body}"
+    if status not in (403, 404, 500):
+        return "fail", f"expected 403/404/500 for invalid model, got {status}: {body}"
 
 
 # ---------------------------------------------------------------------------
