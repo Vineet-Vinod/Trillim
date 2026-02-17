@@ -144,7 +144,6 @@ class ServerState(enum.Enum):
 class LoadModelRequest(BaseModel):
     model_dir: str
     adapter_dir: str | None = None
-    lora: bool | None = None  # None = auto (true if adapter_dir provided)
     threads: int | None = None  # None = keep server default, 0 = auto
 
 

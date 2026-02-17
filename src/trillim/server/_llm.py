@@ -42,7 +42,7 @@ class InferenceEngine:
         stop_tokens: set[int],
         default_params: dict,
         arch_config,
-        use_lora: bool = False,
+        adapter_dir: str | None = None,
         num_threads: int = 0,
     ):
         self.model_dir = model_dir
@@ -50,7 +50,7 @@ class InferenceEngine:
         self.stop_tokens = stop_tokens
         self.default_params = default_params
         self.arch_config = arch_config
-        self.use_lora = use_lora
+        self.adapter_dir = adapter_dir
         self.num_threads = num_threads
         self.process: asyncio.subprocess.Process | None = None
         self.lock = asyncio.Lock()
@@ -62,19 +62,19 @@ class InferenceEngine:
         """Launch the C++ inference subprocess."""
         from trillim.inference import _config_args
 
-        if self.use_lora:
-            lora_path = os.path.join(self.model_dir, "qmodel.lora")
+        if self.adapter_dir:
+            lora_path = os.path.join(self.adapter_dir, "qmodel.lora")
             if not os.path.exists(lora_path):
                 raise RuntimeError(
-                    f"--lora flag set but {lora_path} not found. "
+                    f"--lora set but {lora_path} not found. "
                     "Run 'trillim pull <model>' to download pre-built artifacts."
                 )
 
         from trillim._bin_path import inference_bin
 
         cmd = [inference_bin(), self.model_dir] + _config_args(self.arch_config, num_threads=self.num_threads)
-        if self.use_lora:
-            cmd.append("--lora")
+        if self.adapter_dir:
+            cmd.extend(["--lora", self.adapter_dir])
         self.process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -206,9 +206,9 @@ class LLM(Component):
     """CPU inference component — manages the C++ subprocess and exposes
     /v1/models, /v1/models/load, /v1/chat/completions, /v1/completions."""
 
-    def __init__(self, model_dir: str, num_threads: int = 0, trust_remote_code: bool = False):
+    def __init__(self, model_dir: str, adapter_dir: str | None = None, num_threads: int = 0, trust_remote_code: bool = False):
         self._model_dir = model_dir
-        self._use_lora = False
+        self._adapter_dir = adapter_dir
         self._num_threads = num_threads
         self._trust_remote_code = trust_remote_code
         self.engine: InferenceEngine | None = None
@@ -227,7 +227,7 @@ class LLM(Component):
         self.model_name = os.path.basename(os.path.normpath(self._model_dir))
         config_path = os.path.join(self._model_dir, "config.json")
 
-        tokenizer = load_tokenizer(self._model_dir, self._use_lora, trust_remote_code=self._trust_remote_code)
+        tokenizer = load_tokenizer(self._model_dir, adapter_dir=self._adapter_dir, trust_remote_code=self._trust_remote_code)
         arch_config = ArchConfig.from_config_json(config_path, self._model_dir)
         stop_tokens = set(arch_config.eos_tokens)
         default_params = load_default_params(self._model_dir)
@@ -238,7 +238,7 @@ class LLM(Component):
             stop_tokens,
             default_params,
             arch_config=arch_config,
-            use_lora=self._use_lora,
+            adapter_dir=self._adapter_dir,
             num_threads=self._num_threads,
         )
         await self.engine.start()
@@ -255,19 +255,16 @@ class LLM(Component):
         self,
         model_dir: str,
         adapter_dir: str | None = None,
-        use_lora: bool | None = None,
         num_threads: int | None = None,
     ) -> LoadModelResponse:
         from trillim.model_arch import ModelConfig as ArchConfig
         from trillim.inference import load_tokenizer
+        from trillim.model_store import resolve_model_dir
 
-        # Resolve LoRA setting: explicit > adapter_dir implies true > current default
-        if use_lora is not None:
-            lora = use_lora
-        elif adapter_dir is not None:
-            lora = True
-        else:
-            lora = False
+        # Resolve adapter_dir if provided
+        resolved_adapter: str | None = None
+        if adapter_dir is not None:
+            resolved_adapter = resolve_model_dir(adapter_dir)
 
         config_path = os.path.join(model_dir, "config.json")
         if not os.path.exists(config_path):
@@ -285,20 +282,21 @@ class LLM(Component):
             self.engine = None
 
         # Validate LoRA file exists if requested
-        lora_path = os.path.join(model_dir, "qmodel.lora")
-        if lora and not os.path.exists(lora_path):
-            self.state = ServerState.NO_MODEL
-            return LoadModelResponse(
-                status="error",
-                model=self.model_name,
-                recompiled=False,
-                message=f"LoRA requested but {lora_path} not found. "
-                "Run 'make quantize MODEL_DIR=<path> ADAPTER_DIR=<path>' first.",
-            )
+        if resolved_adapter:
+            lora_path = os.path.join(resolved_adapter, "qmodel.lora")
+            if not os.path.exists(lora_path):
+                self.state = ServerState.NO_MODEL
+                return LoadModelResponse(
+                    status="error",
+                    model=self.model_name,
+                    recompiled=False,
+                    message=f"LoRA requested but {lora_path} not found. "
+                    "Run 'make quantize MODEL_DIR=<path> ADAPTER_DIR=<path>' first.",
+                )
 
         # Load new tokenizer, config, and params
         try:
-            tokenizer = load_tokenizer(model_dir, lora, trust_remote_code=self._trust_remote_code)
+            tokenizer = load_tokenizer(model_dir, adapter_dir=resolved_adapter, trust_remote_code=self._trust_remote_code)
             arch_config = ArchConfig.from_config_json(config_path, model_dir)
             stop_tokens = set(arch_config.eos_tokens)
             default_params = load_default_params(model_dir)
@@ -320,7 +318,7 @@ class LLM(Component):
             stop_tokens,
             default_params,
             arch_config=arch_config,
-            use_lora=lora,
+            adapter_dir=resolved_adapter,
             num_threads=threads,
         )
         try:
@@ -335,7 +333,7 @@ class LLM(Component):
             )
 
         self.engine = new_engine
-        self._use_lora = lora
+        self._adapter_dir = resolved_adapter
         self._num_threads = threads
         self.model_name = new_name
         self.state = ServerState.RUNNING
@@ -385,7 +383,6 @@ class LLM(Component):
                 result = await llm._swap_engine(
                     model_dir,
                     adapter_dir=req.adapter_dir,
-                    use_lora=req.lora,
                     num_threads=req.threads,
                 )
 

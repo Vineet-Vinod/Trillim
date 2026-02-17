@@ -35,7 +35,9 @@ def _cmd_chat(args):
     _resolve(args)
     argv = [sys.argv[0], args.model_dir]
     if args.lora:
-        argv.append("--lora")
+        from trillim.model_store import resolve_model_dir
+
+        argv.extend(["--lora", resolve_model_dir(args.lora)])
     if args.threads:
         argv.extend(["--threads", str(args.threads)])
     if args.trust_remote_code:
@@ -124,7 +126,7 @@ def main():
     # --- chat ---
     p_chat = sub.add_parser("chat", help="Interactive chat with a model")
     p_chat.add_argument("model_dir", help="Path to model directory or HuggingFace model ID")
-    p_chat.add_argument("--lora", action="store_true", help="Enable LoRA adapter")
+    p_chat.add_argument("--lora", help="Path to LoRA adapter directory")
     p_chat.add_argument("--threads", type=int, default=0, help="Number of threads (0 = auto)")
     p_chat.add_argument("--trust-remote-code", action="store_true", help="Allow loading custom tokenizer code from model directory")
     p_chat.set_defaults(func=_cmd_chat)

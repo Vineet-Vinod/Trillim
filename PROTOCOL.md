@@ -11,10 +11,11 @@ protocol version when either side changes the wire format.
 ## 1. Binary Invocation
 
 ```
-inference <model_dir> [--lora] --config <args...>
+inference <model_dir> [--lora <adapter_dir>] --config <args...>
 ```
 
-The Python side launches the C++ binary as a subprocess with stdin/stdout pipes.
+When `--lora` is provided, the engine loads `<adapter_dir>/qmodel.lora` after the
+base model. The Python side launches the C++ binary as a subprocess with stdin/stdout pipes.
 
 ---
 

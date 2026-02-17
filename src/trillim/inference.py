@@ -61,18 +61,21 @@ def _load_from_path(model_path: str, trust_remote_code: bool = False):
     return AutoTokenizer.from_pretrained(model_path)
 
 
-def load_tokenizer(model_dir: str, use_lora: bool = False, trust_remote_code: bool = False):
+def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_code: bool = False):
     """
     Load tokenizer from model directory, with optional LoRA overrides.
 
-    When use_lora=True:
+    When adapter_dir is set:
+    - Looks for lora_* tokenizer files in adapter_dir (not model_dir)
     - If lora_tokenizer.json exists, creates a temp directory with merged tokenizer files
     - Otherwise, loads base tokenizer and applies overrides from lora_tokenizer_config.json
     - Loads chat template from lora_chat_template.jinja if present
     """
-    lora_tokenizer_path = os.path.join(model_dir, "lora_tokenizer.json")
+    # Directory to look for lora_* files — adapter_dir if separate, else model_dir
+    lora_dir = adapter_dir or model_dir
+    lora_tokenizer_path = os.path.join(lora_dir, "lora_tokenizer.json")
 
-    if use_lora and os.path.exists(lora_tokenizer_path):
+    if adapter_dir and os.path.exists(lora_tokenizer_path):
         # LoRA adapter has its own tokenizer - use a temp directory to load it
         lora_tok_dir = tempfile.mkdtemp(prefix="lora_tok_")
         try:
@@ -88,14 +91,14 @@ def load_tokenizer(model_dir: str, use_lora: bool = False, trust_remote_code: bo
             shutil.copy(
                 lora_tokenizer_path, os.path.join(lora_tok_dir, "tokenizer.json")
             )
-            lora_tok_cfg_path = os.path.join(model_dir, "lora_tokenizer_config.json")
+            lora_tok_cfg_path = os.path.join(lora_dir, "lora_tokenizer_config.json")
             if os.path.exists(lora_tok_cfg_path):
                 shutil.copy(
                     lora_tok_cfg_path,
                     os.path.join(lora_tok_dir, "tokenizer_config.json"),
                 )
             lora_chat_template_path = os.path.join(
-                model_dir, "lora_chat_template.jinja"
+                lora_dir, "lora_chat_template.jinja"
             )
             if os.path.exists(lora_chat_template_path):
                 shutil.copy(
@@ -109,8 +112,8 @@ def load_tokenizer(model_dir: str, use_lora: bool = False, trust_remote_code: bo
         tokenizer = _load_from_path(model_dir, trust_remote_code=trust_remote_code)
 
         # Apply tokenizer config overrides if present
-        if use_lora:
-            lora_tok_cfg_path = os.path.join(model_dir, "lora_tokenizer_config.json")
+        if adapter_dir:
+            lora_tok_cfg_path = os.path.join(lora_dir, "lora_tokenizer_config.json")
             if os.path.exists(lora_tok_cfg_path):
                 with open(lora_tok_cfg_path) as f:
                     lora_tok_cfg = json.load(f)
@@ -122,7 +125,7 @@ def load_tokenizer(model_dir: str, use_lora: bool = False, trust_remote_code: bo
                     tokenizer.bos_token = lora_tok_cfg["bos_token"]
             # Also check for standalone chat template file
             lora_chat_template_path = os.path.join(
-                model_dir, "lora_chat_template.jinja"
+                lora_dir, "lora_chat_template.jinja"
             )
             if os.path.exists(lora_chat_template_path):
                 with open(lora_chat_template_path) as f:
@@ -163,14 +166,23 @@ def _config_args(arch_config, num_threads: int = 0) -> list[str]:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: trillim chat <model_directory> [--lora] [--threads N]")
+        print("Usage: trillim chat <model_directory> [--lora <adapter_dir>] [--threads N]")
         sys.exit(1)
 
     MODEL_PATH = sys.argv[1].strip()
     if len(MODEL_PATH) > 1 and MODEL_PATH[-1] == "/":
         MODEL_PATH = MODEL_PATH[:-1]
 
-    USE_LORA = "--lora" in sys.argv
+    # Parse --lora <adapter_dir>
+    ADAPTER_DIR: str | None = None
+    if "--lora" in sys.argv:
+        lora_idx = sys.argv.index("--lora")
+        if lora_idx + 1 < len(sys.argv) and not sys.argv[lora_idx + 1].startswith("--"):
+            ADAPTER_DIR = sys.argv[lora_idx + 1]
+        else:
+            print("Error: --lora requires an adapter directory path.")
+            sys.exit(1)
+
     TRUST_REMOTE_CODE = "--trust-remote-code" in sys.argv
     num_threads = 0
     if "--threads" in sys.argv:
@@ -179,17 +191,17 @@ def main():
             num_threads = int(sys.argv[idx + 1])
     config_path = os.path.join(MODEL_PATH, "config.json")
 
-    if USE_LORA:
-        lora_path = os.path.join(MODEL_PATH, "qmodel.lora")
+    if ADAPTER_DIR:
+        lora_path = os.path.join(ADAPTER_DIR, "qmodel.lora")
         if not os.path.exists(lora_path):
             print(
-                f"Error: --lora flag set but {lora_path} not found. "
+                f"Error: --lora set but {lora_path} not found. "
                 "Run 'make generate MODEL_DIR=<path> ADAPTER_DIR=<path>' first."
             )
             sys.exit(1)
 
     try:
-        tokenizer = load_tokenizer(MODEL_PATH, USE_LORA, trust_remote_code=TRUST_REMOTE_CODE)
+        tokenizer = load_tokenizer(MODEL_PATH, adapter_dir=ADAPTER_DIR, trust_remote_code=TRUST_REMOTE_CODE)
 
         arch_config = ArchConfig.from_config_json(config_path, MODEL_PATH)
         stop_tokens = set(arch_config.eos_tokens)
@@ -197,8 +209,8 @@ def main():
         from trillim._bin_path import inference_bin
 
         cmd = [inference_bin(), MODEL_PATH] + _config_args(arch_config, num_threads=num_threads)
-        if USE_LORA:
-            cmd.append("--lora")
+        if ADAPTER_DIR:
+            cmd.extend(["--lora", ADAPTER_DIR])
         model = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
