@@ -99,6 +99,7 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
     if adapter_dir and os.path.exists(lora_tokenizer_path):
         # LoRA adapter has its own tokenizer - use a temp directory to load it
         lora_tok_dir = tempfile.mkdtemp(prefix="lora_tok_")
+        os.chmod(lora_tok_dir, 0o700)
         try:
             # Copy base model files needed by transformers
             for fname in os.listdir(model_dir):
@@ -128,7 +129,7 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
                 )
             tokenizer = _load_from_path(lora_tok_dir, trust_remote_code=trust_remote_code)
         finally:
-            shutil.rmtree(lora_tok_dir, ignore_errors=True)
+            shutil.rmtree(lora_tok_dir)
     else:
         tokenizer = _load_from_path(model_dir, trust_remote_code=trust_remote_code)
 
