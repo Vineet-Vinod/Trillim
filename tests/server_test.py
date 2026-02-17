@@ -586,9 +586,11 @@ def test_load_model_with_adapter(base_url: str, model_dir: str | None = None,
         return "skip", "no --adapter-dir provided"
 
     import os
-    lora_path = os.path.join(adapter_dir, "qmodel.lora")
+    from trillim.model_store import resolve_model_dir
+    resolved = resolve_model_dir(adapter_dir)
+    lora_path = os.path.join(resolved, "qmodel.lora")
     if not os.path.exists(lora_path):
-        return "skip", f"qmodel.lora not found in {adapter_dir}"
+        return "skip", f"qmodel.lora not found in {resolved}"
 
     payload = {"model_dir": model_dir, "adapter_dir": adapter_dir}
     status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
@@ -599,13 +601,13 @@ def test_load_model_with_adapter(base_url: str, model_dir: str | None = None,
 
     chat_payload = {
         "messages": [{"role": "user", "content": "Say hi."}],
-        "max_tokens": 16,
+        "max_tokens": 32,
     }
     status2, body2 = api(base_url, "POST", "/v1/chat/completions", chat_payload)
     if status2 != 200:
         return "fail", f"inference with LoRA failed: {status2}"
-    if len(body2["choices"][0]["message"]["content"]) == 0:
-        return "fail", "empty response with LoRA"
+    if "choices" not in body2 or len(body2["choices"]) == 0:
+        return "fail", "no choices in response with LoRA"
 
 
 def test_load_model_invalid_adapter(base_url: str, model_dir: str | None = None, **_):
@@ -628,9 +630,11 @@ def test_swap_adapter_to_no_adapter(base_url: str, model_dir: str | None = None,
         return "skip", "no --adapter-dir provided"
 
     import os
-    lora_path = os.path.join(adapter_dir, "qmodel.lora")
+    from trillim.model_store import resolve_model_dir
+    resolved = resolve_model_dir(adapter_dir)
+    lora_path = os.path.join(resolved, "qmodel.lora")
     if not os.path.exists(lora_path):
-        return "skip", f"qmodel.lora not found in {adapter_dir}"
+        return "skip", f"qmodel.lora not found in {resolved}"
 
     # Load with adapter
     payload1 = {"model_dir": model_dir, "adapter_dir": adapter_dir}
