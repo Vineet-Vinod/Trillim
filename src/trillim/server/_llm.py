@@ -288,8 +288,19 @@ class LLM(Component):
                 await self.engine.stop()
             self.engine = None
 
-        # Validate LoRA file exists if requested
+        # Validate LoRA adapter if requested
         if resolved_adapter:
+            trillim_cfg_path = os.path.join(resolved_adapter, "trillim_config.json")
+            if not os.path.exists(trillim_cfg_path):
+                self.state = ServerState.NO_MODEL
+                return LoadModelResponse(
+                    status="error",
+                    model=self.model_name,
+                    recompiled=False,
+                    message=f"{trillim_cfg_path} not found. "
+                    "This adapter has not been quantized for Trillim. "
+                    f"Run: trillim quantize <model_dir> --adapter {resolved_adapter}",
+                )
             lora_path = os.path.join(resolved_adapter, "qmodel.lora")
             if not os.path.exists(lora_path):
                 self.state = ServerState.NO_MODEL
@@ -298,7 +309,7 @@ class LLM(Component):
                     model=self.model_name,
                     recompiled=False,
                     message=f"LoRA requested but {lora_path} not found. "
-                    "Run 'make quantize MODEL_DIR=<path> ADAPTER_DIR=<path>' first.",
+                    f"Run: trillim quantize <model_dir> --adapter {resolved_adapter}",
                 )
 
         # Load new tokenizer, config, and params
