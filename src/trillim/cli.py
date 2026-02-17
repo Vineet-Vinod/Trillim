@@ -17,63 +17,79 @@ def _resolve(args):
 
 def _cmd_quantize(args):
     """Run standalone quantization."""
-    _resolve(args)
-    argv = [sys.argv[0], args.model_dir]
-    if args.model:
-        argv.append("--model")
-    if args.adapter:
-        argv.extend(["--adapter", args.adapter])
-    sys.argv = argv
+    try:
+        _resolve(args)
+        argv = [sys.argv[0], args.model_dir]
+        if args.model:
+            argv.append("--model")
+        if args.adapter:
+            argv.extend(["--adapter", args.adapter])
+        sys.argv = argv
 
-    from trillim.quantize import main
+        from trillim.quantize import main
 
-    main()
+        main()
+    except (RuntimeError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_chat(args):
     """Run interactive chat."""
-    _resolve(args)
-    argv = [sys.argv[0], args.model_dir]
-    if args.lora:
-        from trillim.model_store import resolve_model_dir
+    try:
+        _resolve(args)
+        argv = [sys.argv[0], args.model_dir]
+        if args.lora:
+            from trillim.model_store import resolve_model_dir
 
-        argv.extend(["--lora", resolve_model_dir(args.lora)])
-    if args.threads:
-        argv.extend(["--threads", str(args.threads)])
-    if args.trust_remote_code:
-        argv.append("--trust-remote-code")
-    sys.argv = argv
+            argv.extend(["--lora", resolve_model_dir(args.lora)])
+        if args.threads:
+            argv.extend(["--threads", str(args.threads)])
+        if args.trust_remote_code:
+            argv.append("--trust-remote-code")
+        sys.argv = argv
 
-    from trillim.inference import main
+        from trillim.inference import main
 
-    main()
+        main()
+    except (RuntimeError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_serve(args):
     """Start the API server."""
-    _resolve(args)
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    try:
+        _resolve(args)
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    from trillim import LLM, Server, TTS, Whisper
+        from trillim import LLM, Server, TTS, Whisper
 
-    components = [LLM(args.model_dir, num_threads=args.threads or 0, trust_remote_code=args.trust_remote_code)]
-    if args.voice:
-        components.append(Whisper(model_size=args.whisper_model))
-        components.append(TTS(voices_dir=args.voices_dir))
+        components = [LLM(args.model_dir, num_threads=args.threads or 0, trust_remote_code=args.trust_remote_code)]
+        if args.voice:
+            components.append(Whisper(model_size=args.whisper_model))
+            components.append(TTS(voices_dir=args.voices_dir))
 
-    Server(*components).run(host=args.host, port=args.port)
+        Server(*components).run(host=args.host, port=args.port)
+    except (RuntimeError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_pull(args):
     """Pull a pre-quantized model from HuggingFace."""
-    from trillim.model_store import pull_model
+    try:
+        from trillim.model_store import pull_model
 
-    pull_model(
-        args.model_id,
-        revision=args.revision,
-        token=args.token,
-        force=args.force,
-    )
+        pull_model(
+            args.model_id,
+            revision=args.revision,
+            token=args.token,
+            force=args.force,
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_models(args):

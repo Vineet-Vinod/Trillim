@@ -585,8 +585,7 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
     try:
         result = subprocess.run(cmd, capture_output=False)
         if result.returncode != 0:
-            print(f"Error: C++ quantizer exited with code {result.returncode}")
-            sys.exit(1)
+            raise RuntimeError(f"C++ quantizer exited with code {result.returncode}")
     finally:
         # Clean up manifest and any leftover .tmp from a killed quantizer
         output_tmp = os.path.join(model_dir, "qmodel.tensors.tmp")
@@ -637,8 +636,7 @@ def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir,
         print(f"  Running: {os.path.basename(binary_path)}")
         result = subprocess.run(cmd, capture_output=False)
         if result.returncode != 0:
-            print(f"Error: C++ quantizer exited with code {result.returncode}")
-            sys.exit(1)
+            raise RuntimeError(f"C++ quantizer exited with code {result.returncode}")
     finally:
         # Clean up temp files
         for path in (manifest_path, tmp_output, tmp_output + ".tmp"):

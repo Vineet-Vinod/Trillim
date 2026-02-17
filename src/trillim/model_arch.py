@@ -9,7 +9,6 @@ ModelConfig for extracting model dimensions from config.json.
 import json
 import os
 import struct
-import sys
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
@@ -166,10 +165,9 @@ class ModelConfig:
         arch_name_lower = arch_name.lower()
 
         if arch_name_lower not in ARCH_REGISTRY:
-            print(
-                f"Error: Unsupported architecture '{arch_name}', contact us and we'll add it"
+            raise ValueError(
+                f"Unsupported architecture '{arch_name}'. Contact us and we'll add support for it."
             )
-            sys.exit(1)
 
         arch_info = ARCH_REGISTRY[arch_name_lower]
 
@@ -281,12 +279,10 @@ class ModelConfig:
                         has_qkv_bias=arch_info.has_qkv_bias,
                     )
             else:
-                print(f"Error: Unknown activation function '{hidden_act}'")
-                print(f"Supported activations: {list(act_map.keys())}")
-                print(
-                    "Please add support for this activation in python/trillim/model_arch.py"
+                supported = list(act_map.keys())
+                raise ValueError(
+                    f"Unknown activation function '{hidden_act}'. Supported: {supported}"
                 )
-                sys.exit(1)
 
         # QKV bias detection from config.json
         has_qkv_bias = config.get("attention_bias", arch_info.has_qkv_bias)

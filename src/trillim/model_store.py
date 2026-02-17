@@ -5,7 +5,6 @@ import json
 import os
 import platform
 import re
-import sys
 from pathlib import Path
 
 MODELS_DIR = Path.home() / ".trillim" / "models"
@@ -39,8 +38,7 @@ def resolve_model_dir(arg: str) -> str:
         local = MODELS_DIR / arg
         if local.is_dir():
             return str(local)
-        print(f"Error: Model '{arg}' not found locally.\nRun: trillim pull {arg}")
-        sys.exit(1)
+        raise RuntimeError(f"Model '{arg}' not found locally. Run: trillim pull {arg}")
 
     # Not a HF ID and not a directory — fall through to original path
     # (let downstream code raise its own error about the missing path)
@@ -102,14 +100,11 @@ def pull_model(model_id: str, revision: str | None = None, token: str | None = N
     except Exception as e:
         cls_name = type(e).__name__
         if cls_name == "RepositoryNotFoundError":
-            print(f"Error: Repository '{model_id}' not found on HuggingFace.")
-            sys.exit(1)
+            raise RuntimeError(f"Repository '{model_id}' not found on HuggingFace") from e
         elif cls_name == "GatedRepoError":
-            print(
-                f"Error: '{model_id}' is a gated repository. "
-                "Pass --token or run: huggingface-cli login"
-            )
-            sys.exit(1)
+            raise RuntimeError(
+                f"'{model_id}' is a gated repository. Pass --token or run: hf auth login"
+            ) from e
         else:
             raise
 

@@ -431,8 +431,8 @@ class LLM(Component):
 
             try:
                 model_dir = resolve_model_dir(req.model_dir)
-            except SystemExit:
-                raise HTTPException(status_code=404, detail=f"Model '{req.model_dir}' not found")
+            except RuntimeError as exc:
+                raise HTTPException(status_code=404, detail=str(exc))
             from pathlib import Path
 
             resolved = Path(model_dir).resolve()
