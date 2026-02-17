@@ -68,6 +68,11 @@ def _load_from_path(model_path: str, trust_remote_code: bool = False):
                         file=sys.stderr,
                     )
                 else:
+                    print(
+                        f"WARNING: Loading custom tokenizer code ({os.path.basename(tokenization_file)}) "
+                        "from model directory. Only use --trust-remote-code with models you trust.",
+                        file=sys.stderr,
+                    )
                     spec = importlib.util.spec_from_file_location(
                         "custom_tokenizer", tokenization_file
                     )
