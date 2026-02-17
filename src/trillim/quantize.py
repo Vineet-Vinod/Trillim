@@ -179,13 +179,17 @@ def _safetensors_dtype_code(dtype_str):
 # Manifest writer
 # ---------------------------------------------------------------------------
 
-def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=False):
+def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=False,
+                    manifest_dir=None):
     """Write a binary manifest for the C++ quantizer.
 
     Returns the path to the written manifest file.
 
     When skip_model is True or no safetensors exist (adapter-only mode),
     the manifest contains 0 tensor entries and only LoRA entries.
+
+    manifest_dir overrides where the temp manifest is written (defaults to
+    model_dir).  Use this to avoid writing into a read-only model directory.
     """
     # Try to load base model safetensors; allow adapter-only mode
     if skip_model:
@@ -358,7 +362,7 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
         )
 
     # Write binary manifest
-    manifest_path = os.path.join(model_dir, ".quantize_manifest.bin")
+    manifest_path = os.path.join(manifest_dir or model_dir, ".quantize_manifest.bin")
     with open(manifest_path, "wb") as f:
         # Shard paths table
         f.write(struct.pack("<H", len(shard_path_list)))
@@ -587,7 +591,8 @@ def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir,
                        adapter_output_dir):
     """Invoke the C++ quantizer for LoRA-only extraction (no model tensors)."""
     print("  Writing LoRA manifest...")
-    manifest_path = write_manifest(model_dir, config, adapter_dir=adapter_dir, skip_model=True)
+    manifest_path = write_manifest(model_dir, config, adapter_dir=adapter_dir, skip_model=True,
+                                   manifest_dir=adapter_output_dir)
     print(f"  Manifest: {manifest_path}")
 
     adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
