@@ -23,13 +23,14 @@ dependencies = [
     "huggingface_hub==0.36.0",
     "prompt-toolkit==3.0.52",
     "jinja2==3.1.0",
+    "fastapi==0.128.0",
+    "uvicorn[standard]==0.40.0",
+    "faster-whisper==1.2.1",
+    "pocket-tts==1.0.3",
+    "ruff==0.15.0",
+    "accelerate==1.12.0",
+    "torch==2.9.1",
 ]
-
-[project.optional-dependencies]
-server = ["fastapi==0.128.0", "uvicorn[standard]==0.40.0"]
-voice = ["faster-whisper==1.2.1", "pocket-tts==1.0.3"]
-dev = ["ruff==0.15.0", "accelerate==1.12.0", "torch==2.9.1"]
-all = ["trillim[server,voice,dev]"]
 
 [project.scripts]
 trillim = "trillim.cli:main"
