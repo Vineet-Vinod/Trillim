@@ -1,0 +1,86 @@
+Third-Party Licenses
+====================
+
+Trillim uses the following third-party libraries. Each is listed
+with its license type, copyright holder, and project URL.
+
+--------------------------------------------------------------------------------
+
+transformers
+  License:   Apache License 2.0
+  Copyright: Copyright 2018 The Hugging Face team
+  URL:       https://github.com/huggingface/transformers
+
+--------------------------------------------------------------------------------
+
+torch (PyTorch)
+  License:   BSD 3-Clause License
+  Copyright: Copyright (c) 2016 Facebook, Inc. (Meta Platforms, Inc.)
+  URL:       https://github.com/pytorch/pytorch
+
+--------------------------------------------------------------------------------
+
+accelerate
+  License:   Apache License 2.0
+  Copyright: Copyright 2022 The HuggingFace Team
+  URL:       https://github.com/huggingface/accelerate
+
+--------------------------------------------------------------------------------
+
+huggingface_hub
+  License:   Apache License 2.0
+  Copyright: Copyright 2021 The Hugging Face team
+  URL:       https://github.com/huggingface/huggingface_hub
+
+--------------------------------------------------------------------------------
+
+fastapi
+  License:   MIT License
+  Copyright: Copyright (c) 2018 Sebastián Ramírez
+  URL:       https://github.com/fastapi/fastapi
+
+--------------------------------------------------------------------------------
+
+uvicorn
+  License:   BSD 3-Clause License
+  Copyright: Copyright (c) 2017 Encode OSS Ltd.
+  URL:       https://github.com/encode/uvicorn
+
+--------------------------------------------------------------------------------
+
+faster-whisper
+  License:   MIT License
+  Copyright: Copyright (c) 2023 SYSTRAN
+  URL:       https://github.com/SYSTRAN/faster-whisper
+
+--------------------------------------------------------------------------------
+
+pocket-tts
+  License:   MIT License (code), CC-BY-4.0 (model weights)
+  Copyright: Copyright (c) 2024 Rhasspy
+  Note:      Model weights are subject to the Creative Commons
+             Attribution 4.0 International License (CC-BY-4.0) and
+             may be subject to additional terms from Kyutai. Users
+             must accept model weight licenses independently.
+  URL:       https://github.com/rhasspy/pocket-tts
+
+--------------------------------------------------------------------------------
+
+ruff
+  License:   MIT License
+  Copyright: Copyright (c) 2022 Charles Marsh
+  URL:       https://github.com/astral-sh/ruff
+
+--------------------------------------------------------------------------------
+
+prompt-toolkit
+  License:   BSD 3-Clause License
+  Copyright: Copyright (c) 2014 Jonathan Slenders
+  URL:       https://github.com/prompt-toolkit/python-prompt-toolkit
+
+--------------------------------------------------------------------------------
+
+Jinja2
+  License:   BSD 3-Clause License
+  Copyright: Copyright 2007 Pallets
+  URL:       https://github.com/pallets/jinja

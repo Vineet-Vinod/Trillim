@@ -1,0 +1,24 @@
+__pycache__
+.venv
+.claude
+
+# Build / packaging artifacts
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Bundled binaries
+src/trillim/_bin/*
+
+# Secrets
+.env
+
+# Local lock file
+uv.lock
+
+# Finetune artifacts
+finetune/checkpoints/
+finetune/finetuned_model/
+finetune/dataset/*
+!finetune/dataset/.gitkeep

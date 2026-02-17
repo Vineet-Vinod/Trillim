@@ -1,0 +1,73 @@
+MIT License
+
+Copyright (c) 2026 Trillim.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Proprietary Components
+
+The following components are NOT covered by the MIT License above and are
+governed by the Trillim Proprietary EULA below:
+
+  - Pre-compiled binaries          trillim/_bin/inference, trillim/_bin/trillim-quantize
+  - Wheel build script             scripts/build_wheels.py
+
+---
+
+Trillim Proprietary End-User License Agreement (EULA)
+
+Copyright (c) 2026 Trillim. All rights reserved.
+
+1. GRANT OF LICENSE.  Trillim ("Trillim") grants you a non-exclusive,
+   non-transferable, revocable license to use the closed components listed
+   above solely for the purpose of running Trillim-compatible models on your
+   own hardware.  You may use the closed components as part of applications
+   you build, provided those applications do not expose the closed components
+   as a standalone service or library.
+
+2. RESTRICTIONS.  You may NOT:
+   (a) reverse engineer, decompile, disassemble, or otherwise attempt to
+       derive the source code of any closed component, whether distributed
+       as source or as a compiled binary;
+   (b) redistribute, sublicense, rent, lease, or lend the closed components
+       outside of the official Trillim package (i.e., the package distributed
+       via PyPI under the name "trillim" or via Trillim's official GitHub
+       releases);
+   (c) modify, create derivative works of, or remove any proprietary notices
+       from the closed components;
+   (d) use the closed components to build a competing product that replicates
+       the core functionality of Trillim's kernel library or quantizer.
+
+3. OWNERSHIP.  Trillim retains all right, title, and interest in and to the
+   closed components, including all intellectual property rights therein.
+
+4. NO WARRANTY.  THE CLOSED COMPONENTS ARE PROVIDED "AS IS" WITHOUT WARRANTY
+   OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+   OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+5. LIMITATION OF LIABILITY.  IN NO EVENT SHALL TRILLIM BE LIABLE FOR ANY
+   INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES ARISING
+   OUT OF OR RELATED TO YOUR USE OF THE CLOSED COMPONENTS, REGARDLESS OF THE
+   THEORY OF LIABILITY.
+
+6. TERMINATION.  This license terminates automatically if you violate any of
+   its terms.  Upon termination, you must destroy all copies of the closed
+   components in your possession.
