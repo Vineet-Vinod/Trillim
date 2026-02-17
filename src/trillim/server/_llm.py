@@ -433,9 +433,13 @@ class LLM(Component):
                 model_dir = resolve_model_dir(req.model_dir)
             except SystemExit:
                 raise HTTPException(status_code=404, detail=f"Model '{req.model_dir}' not found")
-            resolved = os.path.realpath(model_dir)
-            allowed = os.path.realpath(str(MODELS_DIR))
-            if not resolved.startswith(allowed + os.sep):
+            from pathlib import Path
+
+            resolved = Path(model_dir).resolve()
+            allowed = Path(str(MODELS_DIR)).resolve()
+            try:
+                resolved.relative_to(allowed)
+            except ValueError:
                 raise HTTPException(
                     status_code=403,
                     detail="Only models in ~/.trillim/models/ can be loaded. Use 'trillim pull' first.",
