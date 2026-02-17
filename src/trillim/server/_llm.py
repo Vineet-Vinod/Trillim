@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ._component import Component
+
+_ENGINE_TIMEOUT = 300  # seconds; maximum wait for a single engine I/O operation
 from ._helpers import load_default_params, make_id, now
 from ._models import (
     ChatChoice,
@@ -95,9 +97,13 @@ class InferenceEngine:
         self._last_cache_hit = 0
         self._cached_prompt_str = ""
         if self.process and self.process.returncode is None:
-            self.process.stdin.write(b"0\n")
-            await self.process.stdin.drain()
-            await self.process.wait()
+            try:
+                self.process.stdin.write(b"0\n")
+                await self.process.stdin.drain()
+                await asyncio.wait_for(self.process.wait(), timeout=10)
+            except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError, OSError):
+                self.process.kill()
+                await self.process.wait()
 
     async def generate(
         self,
@@ -178,7 +184,13 @@ class InferenceEngine:
                 proc.stdin.write(header.encode())
                 for tid in delta_tokens:
                     proc.stdin.write(f"{tid}\n".encode())
-                await proc.stdin.drain()
+                await asyncio.wait_for(proc.stdin.drain(), timeout=_ENGINE_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise RuntimeError(
+                    f"Inference engine unresponsive for {_ENGINE_TIMEOUT}s — "
+                    "the model may be too large for available memory"
+                )
             except (BrokenPipeError, ConnectionResetError, OSError):
                 stderr = ""
                 try:
@@ -194,7 +206,16 @@ class InferenceEngine:
             # Read generated tokens until EOS
             generated_tokens: list[int] = []
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=_ENGINE_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    raise RuntimeError(
+                        f"Inference engine unresponsive for {_ENGINE_TIMEOUT}s — "
+                        "the model may be too large for available memory"
+                    )
                 if not line:
                     break
                 token_id = int(line.strip())
@@ -204,7 +225,18 @@ class InferenceEngine:
                 yield token_id
 
             # Read kv_position and update cache state
-            kv_line = await proc.stdout.readline()
+            try:
+                kv_line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=_ENGINE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                self.cached_token_ids = []
+                self._cached_prompt_str = ""
+                raise RuntimeError(
+                    f"Inference engine unresponsive for {_ENGINE_TIMEOUT}s — "
+                    "the model may be too large for available memory"
+                )
             if kv_line:
                 kv_position = int(kv_line.strip())
                 self.cached_token_ids = (all_token_ids + generated_tokens)[:kv_position]

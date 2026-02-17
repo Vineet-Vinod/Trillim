@@ -6,11 +6,32 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 from trillim.model_arch import ModelConfig as ArchConfig
 from prompt_toolkit import prompt as better_input
 from trillim.token_utils import IncrementalDecoder
 from transformers import AutoTokenizer
+
+_ENGINE_TIMEOUT = 300  # seconds; maximum wait for a single engine I/O operation
+
+
+def _readline_with_timeout(pipe, timeout):
+    """Read a line from a subprocess pipe with a timeout.
+
+    Returns the line string, or None if the timeout expired.
+    """
+    result = []
+
+    def _read():
+        result.append(pipe.readline())
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        return None
+    return result[0] if result else ""
 
 
 def _load_from_path(model_path: str, trust_remote_code: bool = False):
@@ -322,7 +343,11 @@ def main():
             generated_tokens = []
             response_text = ""
             while True:
-                out = model.stdout.readline()
+                out = _readline_with_timeout(model.stdout, _ENGINE_TIMEOUT)
+                if out is None:
+                    model.kill()
+                    print(f"\nError: Inference engine timed out after {_ENGINE_TIMEOUT}s.")
+                    sys.exit(1)
                 if not out:
                     break
                 token = int(out.strip())
@@ -337,7 +362,11 @@ def main():
             print()
 
             # Read kv_position line
-            kv_line = model.stdout.readline()
+            kv_line = _readline_with_timeout(model.stdout, _ENGINE_TIMEOUT)
+            if kv_line is None:
+                model.kill()
+                print(f"\nError: Inference engine timed out after {_ENGINE_TIMEOUT}s.")
+                sys.exit(1)
             if kv_line:
                 kv_position = int(kv_line.strip())
                 cached_token_ids = (all_token_ids + generated_tokens)[:kv_position]
