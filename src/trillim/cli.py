@@ -77,36 +77,56 @@ def _cmd_pull(args):
 
 
 def _cmd_models(args):
-    """List locally downloaded models."""
-    from trillim.model_store import list_models
+    """List locally downloaded models and adapters."""
+    from trillim.model_store import list_adapters, list_models
 
     models = list_models()
+    adapters = list_adapters()
 
     if args.json:
-        print(json.dumps(models, indent=2))
+        print(json.dumps({"models": models, "adapters": adapters}, indent=2))
         return
 
-    if not models:
+    if not models and not adapters:
         print("No models found. Run: trillim pull <org/model>")
         return
 
-    # Column widths
-    id_w = max(len(m["model_id"]) for m in models)
-    id_w = max(id_w, len("MODEL ID"))
-    arch_w = 10
-    size_w = 8
+    if models:
+        # Column widths
+        id_w = max(len(m["model_id"]) for m in models)
+        id_w = max(id_w, len("MODEL ID"))
+        arch_w = 10
+        size_w = 8
 
-    header = (
-        f"{'MODEL ID':<{id_w}}  {'ARCH':<{arch_w}}  {'SIZE':>{size_w}}  {'SOURCE'}"
-    )
-    sep = f"{'-' * id_w}  {'-' * arch_w}  {'-' * size_w}  {'-' * 30}"
-    print(header)
-    print(sep)
-    for m in models:
-        arch = m.get("architecture", "")[:arch_w]
-        size = m.get("size_human", "-")
-        source = m.get("source_model", "")
-        print(f"{m['model_id']:<{id_w}}  {arch:<{arch_w}}  {size:>{size_w}}  {source}")
+        print("Models")
+        header = (
+            f"{'MODEL ID':<{id_w}}  {'ARCH':<{arch_w}}  {'SIZE':>{size_w}}  {'SOURCE'}"
+        )
+        sep = f"{'-' * id_w}  {'-' * arch_w}  {'-' * size_w}  {'-' * 30}"
+        print(header)
+        print(sep)
+        for m in models:
+            arch = m.get("architecture", "")[:arch_w]
+            size = m.get("size_human", "-")
+            source = m.get("source_model", "")
+            print(f"{m['model_id']:<{id_w}}  {arch:<{arch_w}}  {size:>{size_w}}  {source}")
+
+    if adapters:
+        if models:
+            print()
+        id_w = max(len(a["model_id"]) for a in adapters)
+        id_w = max(id_w, len("ADAPTER ID"))
+        size_w = 8
+
+        print("Adapters")
+        header = f"{'ADAPTER ID':<{id_w}}  {'SIZE':>{size_w}}  {'SOURCE'}"
+        sep = f"{'-' * id_w}  {'-' * size_w}  {'-' * 30}"
+        print(header)
+        print(sep)
+        for a in adapters:
+            size = a.get("size_human", "-")
+            source = a.get("source_model", "")
+            print(f"{a['model_id']:<{id_w}}  {size:>{size_w}}  {source}")
 
 
 def main():

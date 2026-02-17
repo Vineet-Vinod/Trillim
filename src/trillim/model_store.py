@@ -118,11 +118,17 @@ def pull_model(model_id: str, revision: str | None = None, token: str | None = N
     return local_dir
 
 
-def list_models() -> list[dict]:
-    """List all locally downloaded models."""
-    models = []
+def _scan_models_dir() -> tuple[list[dict], list[dict]]:
+    """Scan MODELS_DIR and return (models, adapters).
+
+    A directory with ``config.json`` is a model.
+    A directory *without* ``config.json`` but *with* ``trillim_config.json``
+    is an adapter.
+    """
+    models: list[dict] = []
+    adapters: list[dict] = []
     if not MODELS_DIR.is_dir():
-        return models
+        return models, adapters
 
     for org_dir in sorted(MODELS_DIR.iterdir()):
         if not org_dir.is_dir():
@@ -130,16 +136,19 @@ def list_models() -> list[dict]:
         for model_dir in sorted(org_dir.iterdir()):
             if not model_dir.is_dir():
                 continue
-            # Must have config.json to be a valid model
-            if not (model_dir / "config.json").exists():
+
+            has_config = (model_dir / "config.json").exists()
+            tc_path = model_dir / "trillim_config.json"
+            has_tc = tc_path.exists()
+
+            if not has_config and not has_tc:
                 continue
 
-            model_id = f"{org_dir.name}/{model_dir.name}"
-            info: dict = {"model_id": model_id, "path": str(model_dir)}
+            entry_id = f"{org_dir.name}/{model_dir.name}"
+            info: dict = {"model_id": entry_id, "path": str(model_dir)}
 
             # Read trillim_config.json for metadata
-            tc_path = model_dir / "trillim_config.json"
-            if tc_path.exists():
+            if has_tc:
                 try:
                     with open(tc_path) as f:
                         tc = json.load(f)
@@ -149,19 +158,42 @@ def list_models() -> list[dict]:
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            # Report qmodel.tensors size
-            tensors_path = model_dir / "qmodel.tensors"
-            if tensors_path.exists():
-                size_bytes = tensors_path.stat().st_size
-                info["size_bytes"] = size_bytes
-                info["size_human"] = _human_size(size_bytes)
+            if has_config:
+                # Full model — report qmodel.tensors size
+                tensors_path = model_dir / "qmodel.tensors"
+                if tensors_path.exists():
+                    size_bytes = tensors_path.stat().st_size
+                    info["size_bytes"] = size_bytes
+                    info["size_human"] = _human_size(size_bytes)
+                else:
+                    info["size_bytes"] = 0
+                    info["size_human"] = "-"
+                models.append(info)
             else:
-                info["size_bytes"] = 0
-                info["size_human"] = "-"
+                # Adapter only — report qmodel.lora size
+                lora_path = model_dir / "qmodel.lora"
+                if lora_path.exists():
+                    size_bytes = lora_path.stat().st_size
+                    info["size_bytes"] = size_bytes
+                    info["size_human"] = _human_size(size_bytes)
+                else:
+                    info["size_bytes"] = 0
+                    info["size_human"] = "-"
+                adapters.append(info)
 
-            models.append(info)
+    return models, adapters
 
+
+def list_models() -> list[dict]:
+    """List all locally downloaded models."""
+    models, _ = _scan_models_dir()
     return models
+
+
+def list_adapters() -> list[dict]:
+    """List all locally downloaded adapters (trillim_config.json but no config.json)."""
+    _, adapters = _scan_models_dir()
+    return adapters
 
 
 def _human_size(n: int) -> str:
