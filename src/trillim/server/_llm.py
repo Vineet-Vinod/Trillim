@@ -144,8 +144,17 @@ class InferenceEngine:
                 all_token_ids = self.cached_token_ids + delta_tokens
                 reset_flag = 0
                 match_len = len(self.cached_token_ids)
+            elif prompt_str is not None:
+                # String mismatch — different conversation, full reset.
+                # Do NOT fall through to token-level matching: shared
+                # template-header tokens could trick it into reusing a
+                # stale KV cache from the previous conversation.
+                delta_tokens = token_ids
+                reset_flag = 1
+                match_len = 0
+                all_token_ids = token_ids
             else:
-                # Token-level prefix matching (fallback for completions / no template)
+                # Token-level prefix matching (for /v1/completions with no template)
                 cached = self.cached_token_ids
                 match_len = 0
                 limit = min(len(token_ids), len(cached))
@@ -443,7 +452,7 @@ class LLM(Component):
 
             gen_kwargs = dict(
                 token_ids=token_ids,
-                prompt_str=prompt if has_chat_template else None,
+                prompt_str=prompt,
                 temperature=req.temperature,
                 top_k=req.top_k,
                 top_p=req.top_p,
@@ -471,12 +480,16 @@ class LLM(Component):
             cached_tokens = llm.engine._last_cache_hit
 
             # Update cached prompt string for next turn's string-level matching
+            post_messages = messages + [{"role": "assistant", "content": full_text}]
             if has_chat_template:
-                post_messages = messages + [{"role": "assistant", "content": full_text}]
                 llm.engine._cached_prompt_str = tokenizer.apply_chat_template(
                     post_messages,
                     tokenize=False,
                     add_generation_prompt=False,
+                )
+            else:
+                llm.engine._cached_prompt_str = "\n".join(
+                    f"{m['role']}: {m['content']}" for m in post_messages
                 )
 
             return ChatCompletionResponse(
@@ -601,17 +614,21 @@ async def _stream_chat(
         yield f"data: {json.dumps(chunk)}\n\n"
 
     # Update cached prompt string for next turn's string-level matching
-    if (
-        messages is not None
-        and hasattr(tokenizer, "chat_template")
-        and tokenizer.chat_template
-    ):
-        post_messages = messages + [{"role": "assistant", "content": full_text}]
-        llm.engine._cached_prompt_str = tokenizer.apply_chat_template(
-            post_messages,
-            tokenize=False,
-            add_generation_prompt=False,
+    if messages is not None:
+        has_chat_template = (
+            hasattr(tokenizer, "chat_template") and tokenizer.chat_template
         )
+        post_messages = messages + [{"role": "assistant", "content": full_text}]
+        if has_chat_template:
+            llm.engine._cached_prompt_str = tokenizer.apply_chat_template(
+                post_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        else:
+            llm.engine._cached_prompt_str = "\n".join(
+                f"{m['role']}: {m['content']}" for m in post_messages
+            )
 
     chunk = {
         "id": req_id,
