@@ -3,10 +3,11 @@
 Test suite for the Trillim OpenAI-compatible API server.
 
 Start the server first:  trillim serve <model_dir> --voice
-Then run this:           uv run tests/server_test.py [--base-url URL] [--model-dir DIR]
+Then run this:           uv run tests/server_test.py [--base-url URL] [--model-dir DIR] [--adapter-dir DIR]
 
 Voice tests run automatically when the server has --voice enabled;
-otherwise they are skipped.  LoRA tests require --model-dir with qmodel.lora present.
+otherwise they are skipped.  LoRA tests require --adapter-dir pointing to a
+directory with qmodel.lora (separate from --model-dir).
 """
 
 import argparse
@@ -573,48 +574,23 @@ def test_load_invalid_model(base_url: str, **_):
 
 
 # ---------------------------------------------------------------------------
-# LoRA hot-swap tests (require --model-dir with qmodel.lora present)
+# LoRA adapter tests (require --adapter-dir with qmodel.lora)
 # ---------------------------------------------------------------------------
 
-def test_load_model_with_adapter(base_url: str, model_dir: str | None = None, **_):
-    """POST /v1/models/load with lora=true loads pre-quantized LoRA adapter."""
+def test_load_model_with_adapter(base_url: str, model_dir: str | None = None,
+                                 adapter_dir: str | None = None, **_):
+    """POST /v1/models/load with adapter_dir loads LoRA from a separate directory."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if adapter_dir is None:
+        return "skip", "no --adapter-dir provided"
 
     import os
-    lora_path = os.path.join(model_dir, "qmodel.lora")
+    lora_path = os.path.join(adapter_dir, "qmodel.lora")
     if not os.path.exists(lora_path):
-        return "skip", "qmodel.lora not found; qmodel.lora not found in model directory"
+        return "skip", f"qmodel.lora not found in {adapter_dir}"
 
-    payload = {"model_dir": model_dir, "lora": True}
-    status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
-    if status != 200:
-        return "fail", f"expected 200, got {status}: {body}"
-    if body["status"] != "success":
-        return "fail", f"expected success, got {body}"
-
-    chat_payload = {
-        "messages": [{"role": "user", "content": "Say hi."}],
-        "max_tokens": 16,
-    }
-    status2, body2 = api(base_url, "POST", "/v1/chat/completions", chat_payload)
-    if status2 != 200:
-        return "fail", f"post-swap inference failed: {status2}"
-    if len(body2["choices"][0]["message"]["content"]) == 0:
-        return "fail", "empty post-swap response"
-
-
-def test_load_model_lora_true(base_url: str, model_dir: str | None = None, **_):
-    """POST /v1/models/load with lora=true uses an existing qmodel.lora."""
-    if model_dir is None:
-        return "skip", "no --model-dir provided"
-
-    import os
-    lora_path = os.path.join(model_dir, "qmodel.lora")
-    if not os.path.exists(lora_path):
-        return "skip", "qmodel.lora not found; qmodel.lora not found in model directory"
-
-    payload = {"model_dir": model_dir, "lora": True}
+    payload = {"model_dir": model_dir, "adapter_dir": adapter_dir}
     status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
     if status != 200:
         return "fail", f"expected 200, got {status}: {body}"
@@ -632,48 +608,41 @@ def test_load_model_lora_true(base_url: str, model_dir: str | None = None, **_):
         return "fail", "empty response with LoRA"
 
 
-def test_load_model_adapter_lora_false(base_url: str, model_dir: str | None = None, **_):
-    """POST /v1/models/load with lora=false explicitly disables LoRA even if qmodel.lora exists."""
+def test_load_model_invalid_adapter(base_url: str, model_dir: str | None = None, **_):
+    """POST /v1/models/load with a nonexistent adapter_dir returns 500."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
 
-    payload = {"model_dir": model_dir, "lora": False}
+    payload = {"model_dir": model_dir, "adapter_dir": "/tmp/nonexistent_adapter_dir_12345"}
     status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
-    if status != 200:
-        return "fail", f"expected 200, got {status}: {body}"
-    if body["status"] != "success":
-        return "fail", f"expected success, got {body}"
-
-    chat_payload = {
-        "messages": [{"role": "user", "content": "Say hi."}],
-        "max_tokens": 16,
-    }
-    status2, body2 = api(base_url, "POST", "/v1/chat/completions", chat_payload)
-    if status2 != 200:
-        return "fail", f"post-swap inference failed: {status2}"
-    if len(body2["choices"][0]["message"]["content"]) == 0:
-        return "fail", "empty post-swap response"
+    if status != 500:
+        return "fail", f"expected 500 for invalid adapter_dir, got {status}: {body}"
 
 
-def test_swap_lora_to_no_lora(base_url: str, model_dir: str | None = None, **_):
-    """Swap from LoRA-enabled to LoRA-disabled on the same model."""
+def test_swap_adapter_to_no_adapter(base_url: str, model_dir: str | None = None,
+                                    adapter_dir: str | None = None, **_):
+    """Swap from adapter-enabled to no adapter on the same model."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if adapter_dir is None:
+        return "skip", "no --adapter-dir provided"
 
     import os
-    lora_path = os.path.join(model_dir, "qmodel.lora")
+    lora_path = os.path.join(adapter_dir, "qmodel.lora")
     if not os.path.exists(lora_path):
-        return "skip", "qmodel.lora not found; qmodel.lora not found in model directory"
+        return "skip", f"qmodel.lora not found in {adapter_dir}"
 
-    payload1 = {"model_dir": model_dir, "lora": True}
+    # Load with adapter
+    payload1 = {"model_dir": model_dir, "adapter_dir": adapter_dir}
     status1, body1 = api(base_url, "POST", "/v1/models/load", payload1, timeout=600)
     if status1 != 200:
-        return "fail", f"LoRA load failed: {status1}: {body1}"
+        return "fail", f"adapter load failed: {status1}: {body1}"
 
+    # Swap to no adapter
     payload2 = {"model_dir": model_dir}
     status2, body2 = api(base_url, "POST", "/v1/models/load", payload2, timeout=600)
     if status2 != 200:
-        return "fail", f"non-LoRA swap failed: {status2}: {body2}"
+        return "fail", f"no-adapter swap failed: {status2}: {body2}"
 
     chat_payload = {
         "messages": [{"role": "user", "content": "Say hi."}],
@@ -1040,11 +1009,10 @@ ALL_TESTS = [
     test_concurrent_swap_conflict,
     test_inference_during_swap,
     test_load_invalid_model,
-    # LoRA tests (require pre-quantized qmodel.lora; skip gracefully if missing)
+    # LoRA adapter tests (require --adapter-dir with qmodel.lora; skip gracefully if missing)
     test_load_model_with_adapter,
-    test_load_model_lora_true,
-    test_load_model_adapter_lora_false,
-    test_swap_lora_to_no_lora,
+    test_load_model_invalid_adapter,
+    test_swap_adapter_to_no_adapter,
 ]
 
 VOICE_TESTS = [
@@ -1073,6 +1041,10 @@ def main():
         "--model-dir", default=None,
         help="Model directory for the load-model test",
     )
+    parser.add_argument(
+        "--adapter-dir", default=None,
+        help="LoRA adapter directory (separate from model dir) for adapter tests",
+    )
     args = parser.parse_args()
     base = args.base_url.rstrip("/")
 
@@ -1098,7 +1070,7 @@ def main():
     for test_fn in all_tests:
         name = test_fn.__name__
         try:
-            result = test_fn(base_url=base, model_dir=args.model_dir)
+            result = test_fn(base_url=base, model_dir=args.model_dir, adapter_dir=args.adapter_dir)
             if isinstance(result, tuple):
                 status, msg = result
                 if status == "fail":
