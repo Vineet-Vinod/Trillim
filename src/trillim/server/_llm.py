@@ -218,7 +218,13 @@ class InferenceEngine:
                     )
                 if not line:
                     break
-                token_id = int(line.strip())
+                try:
+                    token_id = int(line.strip())
+                except ValueError:
+                    proc.kill()
+                    raise RuntimeError(
+                        f"Protocol error: expected int token_id, got {line.strip()!r}"
+                    )
                 generated_tokens.append(token_id)
                 if token_id in self.stop_tokens:
                     break
@@ -238,7 +244,13 @@ class InferenceEngine:
                     "the model may be too large for available memory"
                 )
             if kv_line:
-                kv_position = int(kv_line.strip())
+                try:
+                    kv_position = int(kv_line.strip())
+                except ValueError:
+                    proc.kill()
+                    raise RuntimeError(
+                        f"Protocol error: expected int kv_position, got {kv_line.strip()!r}"
+                    )
                 self.cached_token_ids = (all_token_ids + generated_tokens)[:kv_position]
             else:
                 self.cached_token_ids = []

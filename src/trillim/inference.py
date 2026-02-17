@@ -350,7 +350,12 @@ def main():
                     sys.exit(1)
                 if not out:
                     break
-                token = int(out.strip())
+                try:
+                    token = int(out.strip())
+                except ValueError:
+                    model.kill()
+                    print(f"\nError: Protocol error — expected int token_id, got {out.strip()!r}")
+                    sys.exit(1)
                 if token in stop_tokens:
                     generated_tokens.append(token)
                     break
@@ -368,7 +373,12 @@ def main():
                 print(f"\nError: Inference engine timed out after {_ENGINE_TIMEOUT}s.")
                 sys.exit(1)
             if kv_line:
-                kv_position = int(kv_line.strip())
+                try:
+                    kv_position = int(kv_line.strip())
+                except ValueError:
+                    model.kill()
+                    print(f"\nError: Protocol error — expected int kv_position, got {kv_line.strip()!r}")
+                    sys.exit(1)
                 cached_token_ids = (all_token_ids + generated_tokens)[:kv_position]
 
             # Update cached prompt string and message history
