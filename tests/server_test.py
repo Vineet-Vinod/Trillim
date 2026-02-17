@@ -132,6 +132,21 @@ def api_binary(base_url: str, method: str, path: str, body=None,
         return exc.code, body_bytes, headers
 
 
+def _hot_swap_allowed(model_dir: str) -> bool:
+    """Return True if model_dir resolves under ~/.trillim/models/ (required by
+    the /v1/models/load security check)."""
+    import os
+    from pathlib import Path
+    from trillim.model_store import resolve_model_dir
+
+    try:
+        resolved = os.path.realpath(resolve_model_dir(model_dir))
+    except SystemExit:
+        return False
+    allowed = os.path.realpath(str(Path.home() / ".trillim" / "models"))
+    return resolved.startswith(allowed + os.sep)
+
+
 def _voice_enabled(base_url: str) -> bool:
     """Return True if the server has the voice pipeline enabled."""
     try:
@@ -518,6 +533,8 @@ def test_cache_cleared_after_hot_swap(base_url: str, model_dir: str | None = Non
     """After a model hot-swap, the cache is cleared (cached_tokens=0)."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     # Prime the cache
     msg = [{"role": "user", "content": "Hello there."}]
@@ -544,6 +561,8 @@ def test_load_model(base_url: str, model_dir: str | None = None, **_):
     """POST /v1/models/load re-loads the current model successfully."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     payload = {"model_dir": model_dir}
     status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
@@ -584,6 +603,8 @@ def test_load_model_with_adapter(base_url: str, model_dir: str | None = None,
         return "skip", "no --model-dir provided"
     if adapter_dir is None:
         return "skip", "no --adapter-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     import os
     from trillim.model_store import resolve_model_dir
@@ -614,6 +635,8 @@ def test_load_model_invalid_adapter(base_url: str, model_dir: str | None = None,
     """POST /v1/models/load with a nonexistent adapter_dir returns 500."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     payload = {"model_dir": model_dir, "adapter_dir": "/tmp/nonexistent_adapter_dir_12345"}
     status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
@@ -628,6 +651,8 @@ def test_swap_adapter_to_no_adapter(base_url: str, model_dir: str | None = None,
         return "skip", "no --model-dir provided"
     if adapter_dir is None:
         return "skip", "no --adapter-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     import os
     from trillim.model_store import resolve_model_dir
@@ -663,6 +688,8 @@ def test_concurrent_swap_conflict(base_url: str, model_dir: str | None = None, *
     """Two rapid concurrent swaps: both should succeed (swap is near-instant, no recompilation)."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     results: list[dict] = [{}, {}]
 
@@ -698,6 +725,8 @@ def test_inference_during_swap(base_url: str, model_dir: str | None = None, **_)
     """Swap is near-instant (no recompilation); verify it completes and inference works after."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
+    if not _hot_swap_allowed(model_dir):
+        return "skip", "model not in ~/.trillim/models/ (use 'trillim pull' for hot-swap tests)"
 
     # Trigger a swap (near-instant since no compilation is needed)
     status, body = api(base_url, "POST", "/v1/models/load",
