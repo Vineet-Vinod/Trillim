@@ -116,7 +116,7 @@ def _get_all_tensor_names(model_dir):
     index_path = os.path.join(model_dir, "model.safetensors.index.json")
     single_path = os.path.join(model_dir, "model.safetensors")
     if os.path.exists(index_path):
-        with open(index_path) as f:
+        with open(index_path, encoding="utf-8") as f:
             return list(json.load(f).get("weight_map", {}).keys())
     if os.path.exists(single_path):
         with open(single_path, "rb") as f:
@@ -156,7 +156,7 @@ class ModelConfig:
         adapter_dir: Optional[str] = None,
     ) -> "ModelConfig":
         """Parse config.json and extract model configuration."""
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
 
         # Detect architecture (case-insensitive lookup)
@@ -346,7 +346,7 @@ class ModelConfig:
             tokenizer_json_path = os.path.join(model_dir, "tokenizer.json")
             if os.path.exists(tokenizer_json_path):
                 try:
-                    with open(tokenizer_json_path) as f:
+                    with open(tokenizer_json_path, encoding="utf-8") as f:
                         tokenizer_data = json.load(f)
                     stop_names = (
                         "<|eot_id|>",
@@ -367,7 +367,7 @@ class ModelConfig:
             lora_tokenizer_path = os.path.join(adapter_dir, "lora_tokenizer.json")
             if os.path.exists(lora_tokenizer_path):
                 try:
-                    with open(lora_tokenizer_path) as f:
+                    with open(lora_tokenizer_path, encoding="utf-8") as f:
                         lora_tok_data = json.load(f)
                     stop_names = (
                         "<|eot_id|>",
@@ -386,7 +386,7 @@ class ModelConfig:
             lora_tok_cfg_path = os.path.join(adapter_dir, "lora_tokenizer_config.json")
             if os.path.exists(lora_tok_cfg_path):
                 try:
-                    with open(lora_tok_cfg_path) as f:
+                    with open(lora_tok_cfg_path, encoding="utf-8") as f:
                         lora_tok_cfg = json.load(f)
                     eos_token_str = lora_tok_cfg.get("eos_token")
                     if eos_token_str:
@@ -396,7 +396,7 @@ class ModelConfig:
                             os.path.join(model_dir, "tokenizer.json"),
                         ):
                             if os.path.exists(tok_path):
-                                with open(tok_path) as f:
+                                with open(tok_path, encoding="utf-8") as f:
                                     tok_data = json.load(f)
                                 for token_entry in tok_data.get("added_tokens", []):
                                     if token_entry.get("content") == eos_token_str:

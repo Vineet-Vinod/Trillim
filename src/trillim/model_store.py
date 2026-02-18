@@ -52,7 +52,7 @@ def validate_trillim_config(path: Path) -> dict | None:
         return None
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         print(f"Warning: Could not read trillim_config.json: {e}")
@@ -145,7 +145,7 @@ def _scan_models_dir() -> tuple[list[dict], list[dict]]:
             # Read trillim_config.json for metadata
             if has_tc:
                 try:
-                    with open(tc_path) as f:
+                    with open(tc_path, encoding="utf-8") as f:
                         tc = json.load(f)
                     info["architecture"] = tc.get("architecture", "")
                     info["source_model"] = tc.get("source_model", "")

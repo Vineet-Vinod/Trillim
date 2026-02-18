@@ -43,7 +43,7 @@ def _load_from_path(model_path: str, trust_remote_code: bool = False):
     tokenizer_config_path = os.path.join(model_path, "tokenizer_config.json")
 
     if os.path.exists(tokenizer_config_path):
-        with open(tokenizer_config_path) as f:
+        with open(tokenizer_config_path, encoding="utf-8") as f:
             tokenizer_config = json.load(f)
 
         tokenizer_class = tokenizer_config.get("tokenizer_class", "")
@@ -142,7 +142,7 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
         if adapter_dir:
             lora_tok_cfg_path = os.path.join(lora_dir, "lora_tokenizer_config.json")
             if os.path.exists(lora_tok_cfg_path):
-                with open(lora_tok_cfg_path) as f:
+                with open(lora_tok_cfg_path, encoding="utf-8") as f:
                     lora_tok_cfg = json.load(f)
                 if "chat_template" in lora_tok_cfg:
                     tokenizer.chat_template = lora_tok_cfg["chat_template"]
@@ -155,7 +155,7 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
                 lora_dir, "lora_chat_template.jinja"
             )
             if os.path.exists(lora_chat_template_path):
-                with open(lora_chat_template_path) as f:
+                with open(lora_chat_template_path, encoding="utf-8") as f:
                     tokenizer.chat_template = f.read()
 
     return tokenizer
@@ -254,6 +254,7 @@ def main():
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            encoding="utf-8",
         )
 
         try:

@@ -66,7 +66,7 @@ def get_sharded_files(model_dir):
         return [single_path], {}
 
     if os.path.exists(index_path):
-        with open(index_path) as f:
+        with open(index_path, encoding="utf-8") as f:
             index = json.load(f)
 
         weight_map = index.get("weight_map", {})
@@ -437,7 +437,7 @@ def _build_lora_entries(adapter_dir, config, shard_path_list, shard_idx_map,
         raise FileNotFoundError(
             f"No adapter_config.json found in {adapter_config_path}"
         )
-    with open(adapter_config_path) as f:
+    with open(adapter_config_path, encoding="utf-8") as f:
         adapter_config = json.load(f)
 
     rank = adapter_config["r"]
@@ -553,7 +553,7 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
 
     # RoPE args
     config_path = os.path.join(model_dir, "config.json")
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         raw_config = json.load(f)
     rope_theta = raw_config.get("rope_theta", 500000.0)
     max_pos = raw_config.get("max_position_embeddings", 4096)
@@ -570,7 +570,7 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
         if not adapter_output_dir:
             raise ValueError("adapter_output_dir is required when adapter_dir is set")
         adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
-        with open(adapter_config_path) as f:
+        with open(adapter_config_path, encoding="utf-8") as f:
             adapter_config = json.load(f)
         rank = adapter_config["r"]
 
@@ -603,7 +603,7 @@ def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir,
     print(f"  Manifest: {manifest_path}")
 
     adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
-    with open(adapter_config_path) as f:
+    with open(adapter_config_path, encoding="utf-8") as f:
         adapter_config = json.load(f)
     rank = adapter_config["r"]
 
@@ -648,7 +648,7 @@ def _copy_adapter_tokenizer_files(adapter_dir, output_dir):
     """Copy tokenizer override files from adapter directory to output directory."""
     adapter_tokenizer_config = os.path.join(adapter_dir, "tokenizer_config.json")
     if os.path.exists(adapter_tokenizer_config):
-        with open(adapter_tokenizer_config) as f:
+        with open(adapter_tokenizer_config, encoding="utf-8") as f:
             adapter_tok_cfg = json.load(f)
         override_fields = [
             "chat_template",
@@ -662,7 +662,7 @@ def _copy_adapter_tokenizer_files(adapter_dir, output_dir):
         }
         if overrides:
             override_path = os.path.join(output_dir, "lora_tokenizer_config.json")
-            with open(override_path, "w") as f:
+            with open(override_path, "w", encoding="utf-8") as f:
                 json.dump(overrides, f, indent=2)
             print(f"  Saved tokenizer overrides: {override_path}")
             for k, v in overrides.items():
@@ -701,7 +701,7 @@ def _write_trillim_adapter_config(output_dir, config, adapter_dir):
     source_model = ""
     adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
     if os.path.exists(adapter_config_path):
-        with open(adapter_config_path) as f:
+        with open(adapter_config_path, encoding="utf-8") as f:
             acfg = json.load(f)
         source_model = acfg.get("base_model_name_or_path", "")
 
@@ -716,7 +716,7 @@ def _write_trillim_adapter_config(output_dir, config, adapter_dir):
     }
 
     cfg_path = os.path.join(output_dir, "trillim_config.json")
-    with open(cfg_path, "w") as f:
+    with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(trillim_cfg, f, indent=2)
         f.write("\n")
     print(f"  Written: {cfg_path}")
