@@ -161,34 +161,109 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
     return tokenizer
 
 
-def _config_args(arch_config, num_threads: int = 0) -> list[str]:
-    """Build --config CLI args for the C++ inference binary.
+def load_default_params(model_dir: str) -> dict:
+    """Return default sampling params for the given model directory."""
+    return {
+        "temperature": 0.6,
+        "top_k": 50,
+        "top_p": 0.9,
+        "repetition_penalty": 1.1,
+        "rep_penalty_lookback": 64,
+    }
 
-    Args:
-        num_threads: Thread count for inference. 0 = auto (hardware_concurrency - 2).
+
+def load_engine_options(
+    model_dir: str,
+    adapter_dir: str | None = None,
+    num_threads: int = 0,
+    lora_quant: str | None = None,
+    unembed_quant: str | None = None,
+) -> dict:
+    """Build engine option dict from CLI args.  Only non-default values included."""
+    opts: dict = {}
+    if num_threads:
+        opts["num_threads"] = num_threads
+    if lora_quant is not None:
+        opts["lora_quant"] = lora_quant
+    if unembed_quant is not None:
+        opts["unembed_quant"] = unembed_quant
+    return opts
+
+
+def _build_init_config(
+    arch_config,
+    adapter_dir: str | None = None,
+    num_threads: int = 0,
+    lora_quant: str | None = None,
+    unembed_quant: str | None = None,
+) -> str:
+    """Build the count-prefixed init block sent via stdin after launch.
+
+    Always emits arch fields + eos_tokens.  Only emits ``lora_dir``,
+    ``num_threads``, ``lora_quant``, and ``unembed_quant`` when non-default.
     """
-    args = [
-        "--config",
-        str(int(arch_config.arch_type)),
-        str(int(arch_config.arch_info.activation)),
-        str(arch_config.hidden_dim),
-        str(arch_config.intermediate_dim),
-        str(arch_config.num_layers),
-        str(arch_config.num_heads),
-        str(arch_config.num_kv_heads),
-        str(arch_config.vocab_size),
-        str(arch_config.head_dim),
-        str(arch_config.max_position_embeddings),
-        str(arch_config.norm_eps),
-        str(arch_config.rope_theta),
-        "1" if arch_config.tie_word_embeddings else "0",
-        "1" if arch_config.has_qkv_bias else "0",
-        "1" if arch_config.arch_info.has_attn_sub_norm else "0",
-        "1" if arch_config.arch_info.has_ffn_sub_norm else "0",
-        str(num_threads),
-        str(len(arch_config.eos_tokens)),
-    ] + [str(t) for t in arch_config.eos_tokens]
-    return args
+    pairs = [
+        f"arch_type={int(arch_config.arch_type)}",
+        f"activation={int(arch_config.arch_info.activation)}",
+        f"hidden_dim={arch_config.hidden_dim}",
+        f"intermediate_dim={arch_config.intermediate_dim}",
+        f"num_layers={arch_config.num_layers}",
+        f"num_heads={arch_config.num_heads}",
+        f"num_kv_heads={arch_config.num_kv_heads}",
+        f"vocab_size={arch_config.vocab_size}",
+        f"head_dim={arch_config.head_dim}",
+        f"max_position_embeddings={arch_config.max_position_embeddings}",
+        f"norm_eps={arch_config.norm_eps}",
+        f"rope_theta={arch_config.rope_theta}",
+        f"tie_word_embeddings={'1' if arch_config.tie_word_embeddings else '0'}",
+        f"has_qkv_bias={'1' if arch_config.has_qkv_bias else '0'}",
+        f"has_attn_sub_norm={'1' if arch_config.arch_info.has_attn_sub_norm else '0'}",
+        f"has_ffn_sub_norm={'1' if arch_config.arch_info.has_ffn_sub_norm else '0'}",
+        f"eos_tokens={','.join(str(t) for t in arch_config.eos_tokens)}",
+    ]
+    if adapter_dir:
+        pairs.append(f"lora_dir={adapter_dir}")
+    if num_threads:
+        pairs.append(f"num_threads={num_threads}")
+    if lora_quant is not None:
+        pairs.append(f"lora_quant={lora_quant}")
+    if unembed_quant is not None:
+        pairs.append(f"unembed_quant={unembed_quant}")
+    return f"{len(pairs)}\n" + "".join(f"{p}\n" for p in pairs)
+
+
+def _build_request_block(
+    delta_tokens: list[int],
+    reset_flag: int,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    repetition_penalty: float | None = None,
+    rep_penalty_lookback: int | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Build the count-prefixed per-request block.
+
+    Always emits ``reset`` and ``tokens``.  Only emits sampling params
+    when explicitly provided (not None).
+    """
+    pairs: list[str] = [
+        f"reset={reset_flag}",
+        f"tokens={','.join(str(t) for t in delta_tokens)}",
+    ]
+    if temperature is not None:
+        pairs.append(f"temperature={temperature}")
+    if top_k is not None:
+        pairs.append(f"top_k={top_k}")
+    if top_p is not None:
+        pairs.append(f"top_p={top_p}")
+    if repetition_penalty is not None:
+        pairs.append(f"repetition_penalty={repetition_penalty}")
+    if rep_penalty_lookback is not None:
+        pairs.append(f"rep_penalty_lookback={rep_penalty_lookback}")
+    if max_tokens is not None:
+        pairs.append(f"max_tokens={max_tokens}")
+    return f"{len(pairs)}\n" + "".join(f"{p}\n" for p in pairs)
 
 
 def main():
@@ -244,9 +319,7 @@ def main():
 
         from trillim._bin_path import inference_bin
 
-        cmd = [inference_bin(), MODEL_PATH] + _config_args(arch_config, num_threads=num_threads)
-        if ADAPTER_DIR:
-            cmd.extend(["--lora", ADAPTER_DIR])
+        cmd = [inference_bin(), MODEL_PATH]
         model = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -256,6 +329,8 @@ def main():
             bufsize=1,
             encoding="utf-8",
         )
+        model.stdin.write(_build_init_config(arch_config, adapter_dir=ADAPTER_DIR, num_threads=num_threads))
+        model.stdin.flush()
 
         try:
             _run_chat_loop(model, tokenizer, arch_config)
@@ -359,18 +434,13 @@ def _run_chat_loop(model, tokenizer, arch_config):
             delta_tokens = all_token_ids
             reset_flag = 1
 
-        # Send protocol: num_tokens, reset_flag, sampling params, token IDs
-        model.stdin.write(f"{len(delta_tokens)}\n")
-        model.stdin.write(f"{reset_flag}\n")
+        # Send count-prefixed key=value request block
+        model.stdin.write(_build_request_block(
+            delta_tokens, reset_flag,
+            temperature=0.6, top_k=50, top_p=0.9,
+            repetition_penalty=1.1, rep_penalty_lookback=64,
+        ))
         model.stdin.flush()
-
-        # temperature top_k top_p repetition_penalty rep_penalty_lookback max_tokens
-        model.stdin.write("0.6\n50\n0.9\n1.1\n64\n0\n")
-        model.stdin.flush()
-
-        for tok in delta_tokens:
-            model.stdin.write(f"{tok}\n")
-            model.stdin.flush()
 
         print("Model Response: ", end="", flush=True)
         decoder = IncrementalDecoder(tokenizer)

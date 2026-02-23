@@ -62,7 +62,7 @@ class InferenceEngine:
 
     async def start(self):
         """Launch the C++ inference subprocess."""
-        from trillim.inference import _config_args
+        from trillim.inference import _build_init_config
 
         if self.adapter_dir:
             trillim_cfg_path = os.path.join(self.adapter_dir, "trillim_config.json")
@@ -81,15 +81,18 @@ class InferenceEngine:
 
         from trillim._bin_path import inference_bin
 
-        cmd = [inference_bin(), self.model_dir] + _config_args(self.arch_config, num_threads=self.num_threads)
-        if self.adapter_dir:
-            cmd.extend(["--lora", self.adapter_dir])
+        cmd = [inference_bin(), self.model_dir]
         self.process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        init_block = _build_init_config(
+            self.arch_config, adapter_dir=self.adapter_dir, num_threads=self.num_threads,
+        )
+        self.process.stdin.write(init_block.encode())
+        await self.process.stdin.drain()
 
     async def stop(self):
         """Shut down the subprocess gracefully."""
@@ -178,12 +181,17 @@ class InferenceEngine:
 
             self._last_cache_hit = match_len
 
-            # Protocol: num_tokens, reset_flag, then sampling params, then token IDs
-            header = f"{len(delta_tokens)}\n{reset_flag}\n{temp}\n{tk}\n{tp}\n{rp}\n{rl}\n{mt}\n"
+            # Build count-prefixed key=value request block
+            from trillim.inference import _build_request_block
+
+            req_block = _build_request_block(
+                delta_tokens, reset_flag,
+                temperature=temp, top_k=tk, top_p=tp,
+                repetition_penalty=rp, rep_penalty_lookback=rl,
+                max_tokens=mt or None,
+            )
             try:
-                proc.stdin.write(header.encode())
-                for tid in delta_tokens:
-                    proc.stdin.write(f"{tid}\n".encode())
+                proc.stdin.write(req_block.encode())
                 await asyncio.wait_for(proc.stdin.drain(), timeout=_ENGINE_TIMEOUT)
             except asyncio.TimeoutError:
                 proc.kill()

@@ -14,9 +14,6 @@ src/trillim/_bin/*
 # Secrets
 .env
 
-# Local lock file
-uv.lock
-
 # Finetune artifacts
 finetune/checkpoints/
 finetune/finetuned_model/

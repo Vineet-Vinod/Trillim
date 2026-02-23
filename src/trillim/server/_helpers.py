@@ -13,12 +13,4 @@ def now() -> int:
     return int(time.time())
 
 
-def load_default_params(model_dir: str) -> dict:
-    """Return hardcoded default sampling params."""
-    return {
-        "temperature": 0.6,
-        "top_k": 50,
-        "top_p": 0.9,
-        "repetition_penalty": 1.1,
-        "rep_penalty_lookback": 64,
-    }
+from trillim.inference import load_default_params  # re-export
