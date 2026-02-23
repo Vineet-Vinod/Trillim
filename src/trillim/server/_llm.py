@@ -299,7 +299,7 @@ class LLM(Component):
         tokenizer = load_tokenizer(self._model_dir, adapter_dir=self._adapter_dir, trust_remote_code=self._trust_remote_code)
         arch_config = ArchConfig.from_config_json(config_path, self._model_dir, adapter_dir=self._adapter_dir)
         stop_tokens = set(arch_config.eos_tokens)
-        default_params = load_default_params()
+        default_params = load_default_params(self._model_dir)
 
         self.engine = InferenceEngine(
             self._model_dir,
@@ -372,7 +372,7 @@ class LLM(Component):
             tokenizer = load_tokenizer(model_dir, adapter_dir=resolved_adapter, trust_remote_code=self._trust_remote_code)
             arch_config = ArchConfig.from_config_json(config_path, model_dir, adapter_dir=resolved_adapter)
             stop_tokens = set(arch_config.eos_tokens)
-            default_params = load_default_params()
+            default_params = load_default_params(model_dir)
         except Exception as exc:
             return LoadModelResponse(
                 status="error",

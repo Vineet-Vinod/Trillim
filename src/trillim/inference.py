@@ -161,15 +161,23 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
     return tokenizer
 
 
-def load_default_params() -> dict:
-    """Return default sampling params."""
-    return {
+def load_default_params(model_dir: str) -> dict:
+    """Load sampling params from generation_config.json, falling back to defaults."""
+    defaults = {
         "temperature": 0.6,
         "top_k": 50,
         "top_p": 0.9,
         "repetition_penalty": 1.1,
         "rep_penalty_lookback": 64,
     }
+    gen_config_path = os.path.join(model_dir, "generation_config.json")
+    if os.path.exists(gen_config_path):
+        with open(gen_config_path, encoding="utf-8") as f:
+            gen_config = json.load(f)
+        for key in defaults:
+            if key in gen_config:
+                defaults[key] = gen_config[key]
+    return defaults
 
 
 def load_engine_options(
@@ -331,7 +339,7 @@ def main():
         model.stdin.write(_build_init_config(arch_config, adapter_dir=ADAPTER_DIR, **engine_options))
         model.stdin.flush()
 
-        sampling_params = load_default_params()
+        sampling_params = load_default_params(MODEL_PATH)
 
         try:
             _run_chat_loop(model, tokenizer, arch_config, sampling_params)
