@@ -145,6 +145,8 @@ class LoadModelRequest(BaseModel):
     model_dir: str
     adapter_dir: str | None = None
     threads: int | None = None  # None = keep server default, 0 = auto
+    lora_quant: str | None = None
+    unembed_quant: str | None = None
 
 
 class LoadModelResponse(BaseModel):

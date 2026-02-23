@@ -274,7 +274,7 @@ def _build_request_block(
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: trillim chat <model_directory> [--lora <adapter_dir>] [--threads N]")
+        print("Usage: trillim chat <model_directory> [--lora <adapter_dir>] [--threads N] [--lora-quant TYPE] [--unembed-quant TYPE]")
         sys.exit(1)
 
     MODEL_PATH = sys.argv[1].strip()
@@ -297,6 +297,16 @@ def main():
         idx = sys.argv.index("--threads")
         if idx + 1 < len(sys.argv):
             num_threads = int(sys.argv[idx + 1])
+    lora_quant = None
+    if "--lora-quant" in sys.argv:
+        idx = sys.argv.index("--lora-quant")
+        if idx + 1 < len(sys.argv):
+            lora_quant = sys.argv[idx + 1]
+    unembed_quant = None
+    if "--unembed-quant" in sys.argv:
+        idx = sys.argv.index("--unembed-quant")
+        if idx + 1 < len(sys.argv):
+            unembed_quant = sys.argv[idx + 1]
     config_path = os.path.join(MODEL_PATH, "config.json")
 
     if ADAPTER_DIR:
@@ -335,7 +345,7 @@ def main():
             bufsize=1,
             encoding="utf-8",
         )
-        engine_options = load_engine_options(num_threads=num_threads)
+        engine_options = load_engine_options(num_threads=num_threads, lora_quant=lora_quant, unembed_quant=unembed_quant)
         model.stdin.write(_build_init_config(arch_config, adapter_dir=ADAPTER_DIR, **engine_options))
         model.stdin.flush()
 

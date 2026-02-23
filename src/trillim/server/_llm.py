@@ -46,6 +46,8 @@ class InferenceEngine:
         arch_config,
         adapter_dir: str | None = None,
         num_threads: int = 0,
+        lora_quant: str | None = None,
+        unembed_quant: str | None = None,
     ):
         self.model_dir = model_dir
         self.tokenizer = tokenizer
@@ -54,6 +56,8 @@ class InferenceEngine:
         self.arch_config = arch_config
         self.adapter_dir = adapter_dir
         self.num_threads = num_threads
+        self.lora_quant = lora_quant
+        self.unembed_quant = unembed_quant
         self.process: asyncio.subprocess.Process | None = None
         self.lock = asyncio.Lock()
         self.cached_token_ids: list[int] = []
@@ -88,7 +92,11 @@ class InferenceEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        engine_options = load_engine_options(num_threads=self.num_threads)
+        engine_options = load_engine_options(
+            num_threads=self.num_threads,
+            lora_quant=self.lora_quant,
+            unembed_quant=self.unembed_quant,
+        )
         init_block = _build_init_config(
             self.arch_config, adapter_dir=self.adapter_dir, **engine_options,
         )
@@ -275,11 +283,13 @@ class LLM(Component):
     """CPU inference component — manages the C++ subprocess and exposes
     /v1/models, /v1/models/load, /v1/chat/completions, /v1/completions."""
 
-    def __init__(self, model_dir: str, adapter_dir: str | None = None, num_threads: int = 0, trust_remote_code: bool = False):
+    def __init__(self, model_dir: str, adapter_dir: str | None = None, num_threads: int = 0, trust_remote_code: bool = False, lora_quant: str | None = None, unembed_quant: str | None = None):
         self._model_dir = model_dir
         self._adapter_dir = adapter_dir
         self._num_threads = num_threads
         self._trust_remote_code = trust_remote_code
+        self._lora_quant = lora_quant
+        self._unembed_quant = unembed_quant
         self.engine: InferenceEngine | None = None
         self.model_name: str = "unknown"
         self.state: ServerState = ServerState.NO_MODEL
@@ -309,6 +319,8 @@ class LLM(Component):
             arch_config=arch_config,
             adapter_dir=self._adapter_dir,
             num_threads=self._num_threads,
+            lora_quant=self._lora_quant,
+            unembed_quant=self._unembed_quant,
         )
         await self.engine.start()
         self.state = ServerState.RUNNING
@@ -325,6 +337,8 @@ class LLM(Component):
         model_dir: str,
         adapter_dir: str | None = None,
         num_threads: int | None = None,
+        lora_quant: str | None = None,
+        unembed_quant: str | None = None,
     ) -> LoadModelResponse:
         from trillim.model_arch import ModelConfig as ArchConfig
         from trillim.inference import load_tokenizer
@@ -398,6 +412,8 @@ class LLM(Component):
             arch_config=arch_config,
             adapter_dir=resolved_adapter,
             num_threads=threads,
+            lora_quant=lora_quant,
+            unembed_quant=unembed_quant,
         )
         try:
             await new_engine.start()
@@ -413,6 +429,8 @@ class LLM(Component):
         self.engine = new_engine
         self._adapter_dir = resolved_adapter
         self._num_threads = threads
+        self._lora_quant = lora_quant
+        self._unembed_quant = unembed_quant
         self.model_name = new_name
         self.state = ServerState.RUNNING
 
@@ -466,6 +484,8 @@ class LLM(Component):
                     model_dir,
                     adapter_dir=req.adapter_dir,
                     num_threads=req.threads,
+                    lora_quant=req.lora_quant,
+                    unembed_quant=req.unembed_quant,
                 )
 
             if result.status == "error":
