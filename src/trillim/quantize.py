@@ -15,6 +15,7 @@ Usage:
     trillim quantize <model_dir> --model --adapter <adapter_dir>  # both
 """
 
+import hashlib
 import json
 import os
 import re
@@ -693,7 +694,36 @@ def _make_adapter_output_dir(adapter_dir):
     return output_dir
 
 
-def _write_trillim_adapter_config(output_dir, config, adapter_dir):
+def compute_base_model_hash(model_dir):
+    """Compute a stable hash from the base model's identifying config fields.
+
+    Returns a hex SHA-256 digest string, or "" if config.json cannot be read.
+    """
+    config_path = os.path.join(model_dir, "config.json")
+    if not os.path.exists(config_path):
+        return ""
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    # Extract the fields that uniquely identify a model architecture.
+    # Sorted keys + json.dumps(sort_keys=True) keeps the hash deterministic.
+    identity = {
+        "architectures": raw.get("architectures", []),
+        "hidden_size": raw.get("hidden_size"),
+        "intermediate_size": raw.get("intermediate_size"),
+        "num_hidden_layers": raw.get("num_hidden_layers"),
+        "num_attention_heads": raw.get("num_attention_heads"),
+        "num_key_value_heads": raw.get("num_key_value_heads"),
+        "vocab_size": raw.get("vocab_size"),
+    }
+    blob = json.dumps(identity, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _write_trillim_adapter_config(output_dir, config, adapter_dir, model_dir):
     """Write trillim_config.json into the quantized adapter output directory."""
     # Try to read source_model from the base model's config.json
     source_model = ""
@@ -705,12 +735,13 @@ def _write_trillim_adapter_config(output_dir, config, adapter_dir):
 
     trillim_cfg = {
         "trillim_version": "0.1.0",
-        "format_version": 1,
+        "format_version": 2,
         "type": "lora_adapter",
         "quantization": "ternary",
         "source_model": source_model,
         "architecture": config.arch_type.name.lower(),
         "platforms": ["x86_64", "aarch64"],
+        "base_model_config_hash": compute_base_model_hash(model_dir),
     }
 
     cfg_path = os.path.join(output_dir, "trillim_config.json")
@@ -815,7 +846,7 @@ def main():
     # Copy tokenizer files and write trillim_config.json to output dir
     if args.adapter:
         _copy_adapter_tokenizer_files(args.adapter, adapter_output_dir)
-        _write_trillim_adapter_config(adapter_output_dir, config, args.adapter)
+        _write_trillim_adapter_config(adapter_output_dir, config, args.adapter, model_dir)
 
     print("\n" + "=" * 60)
     print("Done!")

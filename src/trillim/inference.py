@@ -327,6 +327,12 @@ def main():
                 f"{ADAPTER_DIR}"
             )
             sys.exit(1)
+        from trillim.model_store import AdapterCompatError, validate_adapter_model_compat
+        try:
+            validate_adapter_model_compat(ADAPTER_DIR, MODEL_PATH)
+        except AdapterCompatError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
 
     try:
         tokenizer = load_tokenizer(MODEL_PATH, adapter_dir=ADAPTER_DIR, trust_remote_code=TRUST_REMOTE_CODE)

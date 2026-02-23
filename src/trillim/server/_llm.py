@@ -82,6 +82,8 @@ class InferenceEngine:
                     f"--lora set but {lora_path} not found. "
                     f"Run: trillim quantize <model_dir> --adapter {self.adapter_dir}"
                 )
+            from trillim.model_store import validate_adapter_model_compat
+            validate_adapter_model_compat(self.adapter_dir, self.model_dir)
 
         from trillim._bin_path import inference_bin
 
@@ -378,6 +380,16 @@ class LLM(Component):
                     recompiled=False,
                     message=f"LoRA requested but {lora_path} not found. "
                     f"Run: trillim quantize <model_dir> --adapter {resolved_adapter}",
+                )
+            from trillim.model_store import AdapterCompatError, validate_adapter_model_compat
+            try:
+                validate_adapter_model_compat(resolved_adapter, model_dir)
+            except AdapterCompatError as e:
+                return LoadModelResponse(
+                    status="error",
+                    model=self.model_name,
+                    recompiled=False,
+                    message=str(e),
                 )
 
         # Load new tokenizer, config, and params before stopping the old engine
