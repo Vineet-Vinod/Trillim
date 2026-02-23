@@ -133,7 +133,7 @@ def get_processing_order(tensors_meta, arch_info):
 # Action codes (match C++ TensorAction enum)
 ACTION_BF16_RAW         = 0
 ACTION_TERNARY_QUANTIZE = 1
-ACTION_EMBEDDING_I8     = 2
+# ACTION_EMBEDDING_I8     = 2 (removed in Quantization v2 update)
 ACTION_REPACK_TERNARY   = 3
 
 # Dtype codes (match C++ DType enum)
@@ -299,10 +299,8 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
             dtype_code, _ = _safetensors_dtype_code(dtype_str)
 
             # Determine action
-            if is_embedding:
-                action = ACTION_EMBEDDING_I8 if tie_word_embeddings else ACTION_BF16_RAW
-            elif is_lm_head:
-                action = ACTION_EMBEDDING_I8
+            if is_embedding or is_lm_head:
+                action = ACTION_BF16_RAW
             elif should_quantize:
                 action = ACTION_REPACK_TERNARY if dtype_str in ("I8", "U8") else ACTION_TERNARY_QUANTIZE
             else:
