@@ -161,8 +161,8 @@ def load_tokenizer(model_dir: str, adapter_dir: str | None = None, trust_remote_
     return tokenizer
 
 
-def load_default_params(model_dir: str) -> dict:
-    """Return default sampling params for the given model directory."""
+def load_default_params() -> dict:
+    """Return default sampling params."""
     return {
         "temperature": 0.6,
         "top_k": 50,
@@ -173,8 +173,6 @@ def load_default_params(model_dir: str) -> dict:
 
 
 def load_engine_options(
-    model_dir: str,
-    adapter_dir: str | None = None,
     num_threads: int = 0,
     lora_quant: str | None = None,
     unembed_quant: str | None = None,
@@ -329,11 +327,14 @@ def main():
             bufsize=1,
             encoding="utf-8",
         )
-        model.stdin.write(_build_init_config(arch_config, adapter_dir=ADAPTER_DIR, num_threads=num_threads))
+        engine_options = load_engine_options(num_threads=num_threads)
+        model.stdin.write(_build_init_config(arch_config, adapter_dir=ADAPTER_DIR, **engine_options))
         model.stdin.flush()
 
+        sampling_params = load_default_params()
+
         try:
-            _run_chat_loop(model, tokenizer, arch_config)
+            _run_chat_loop(model, tokenizer, arch_config, sampling_params)
         finally:
             if model.returncode is None:
                 model.terminate()
@@ -357,7 +358,7 @@ def main():
         print(f"\nAn error occurred: {e}")
 
 
-def _run_chat_loop(model, tokenizer, arch_config):
+def _run_chat_loop(model, tokenizer, arch_config, sampling_params):
     """Run the interactive chat loop against a running inference subprocess."""
     stop_tokens = set(arch_config.eos_tokens)
     max_context = arch_config.max_position_embeddings
@@ -435,11 +436,7 @@ def _run_chat_loop(model, tokenizer, arch_config):
             reset_flag = 1
 
         # Send count-prefixed key=value request block
-        model.stdin.write(_build_request_block(
-            delta_tokens, reset_flag,
-            temperature=0.6, top_k=50, top_p=0.9,
-            repetition_penalty=1.1, rep_penalty_lookback=64,
-        ))
+        model.stdin.write(_build_request_block(delta_tokens, reset_flag, **sampling_params))
         model.stdin.flush()
 
         print("Model Response: ", end="", flush=True)

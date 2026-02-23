@@ -62,7 +62,7 @@ class InferenceEngine:
 
     async def start(self):
         """Launch the C++ inference subprocess."""
-        from trillim.inference import _build_init_config
+        from trillim.inference import _build_init_config, load_engine_options
 
         if self.adapter_dir:
             trillim_cfg_path = os.path.join(self.adapter_dir, "trillim_config.json")
@@ -88,8 +88,9 @@ class InferenceEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        engine_options = load_engine_options(num_threads=self.num_threads)
         init_block = _build_init_config(
-            self.arch_config, adapter_dir=self.adapter_dir, num_threads=self.num_threads,
+            self.arch_config, adapter_dir=self.adapter_dir, **engine_options,
         )
         self.process.stdin.write(init_block.encode())
         await self.process.stdin.drain()
@@ -298,7 +299,7 @@ class LLM(Component):
         tokenizer = load_tokenizer(self._model_dir, adapter_dir=self._adapter_dir, trust_remote_code=self._trust_remote_code)
         arch_config = ArchConfig.from_config_json(config_path, self._model_dir, adapter_dir=self._adapter_dir)
         stop_tokens = set(arch_config.eos_tokens)
-        default_params = load_default_params(self._model_dir)
+        default_params = load_default_params()
 
         self.engine = InferenceEngine(
             self._model_dir,
@@ -371,7 +372,7 @@ class LLM(Component):
             tokenizer = load_tokenizer(model_dir, adapter_dir=resolved_adapter, trust_remote_code=self._trust_remote_code)
             arch_config = ArchConfig.from_config_json(config_path, model_dir, adapter_dir=resolved_adapter)
             stop_tokens = set(arch_config.eos_tokens)
-            default_params = load_default_params(model_dir)
+            default_params = load_default_params()
         except Exception as exc:
             return LoadModelResponse(
                 status="error",
