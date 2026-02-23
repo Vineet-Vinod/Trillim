@@ -694,6 +694,75 @@ def _make_adapter_output_dir(adapter_dir):
     return output_dir
 
 
+def _validate_adapter_dims(adapter_dir, config):
+    """Check that LoRA tensor dimensions are compatible with the model config.
+
+    Reads the adapter safetensors header (no weight data) and verifies that
+    representative LoRA matrix shapes match the model's hidden/intermediate
+    dimensions and layer count.  Raises ``SystemExit`` on mismatch so the
+    user gets a clear error before any heavy quantization work starts.
+    """
+    st_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    if not os.path.exists(st_path):
+        return  # Missing file is caught later by _build_lora_entries
+
+    header, _ = _get_header_and_offsets(st_path)
+    tensor_names = [k for k in header if k != "__metadata__"]
+
+    # Detect the key prefix used in this adapter (PEFT vs plain)
+    prefixes = ["base_model.model.model.layers.", "model.layers."]
+
+    def _find(layer, target, ab):
+        for pfx in prefixes:
+            key = f"{pfx}{layer}.{target}.lora_{ab}.weight"
+            if key in header:
+                return header[key]
+        return None
+
+    # --- Check layer count ---
+    max_layer = -1
+    layer_re = re.compile(r"layers\.(\d+)\.")
+    for name in tensor_names:
+        m = layer_re.search(name)
+        if m:
+            max_layer = max(max_layer, int(m.group(1)))
+
+    if max_layer >= 0 and (max_layer + 1) > config.num_layers:
+        print(
+            f"Error: adapter has weights for {max_layer + 1} layers but the "
+            f"base model only has {config.num_layers} layers.\n"
+            "This adapter was not trained on this model."
+        )
+        sys.exit(1)
+
+    # --- Check hidden dimension via q_proj lora_A (shape [rank, hidden_size]) ---
+    expected_hidden = config.hidden_dim_orig or config.hidden_dim
+    a_info = _find(0, "self_attn.q_proj", "A")
+    if a_info is not None:
+        cols = a_info["shape"][1]  # [rank, in_features]
+        if cols != expected_hidden:
+            print(
+                f"Error: adapter q_proj lora_A has input dim {cols} but the "
+                f"base model hidden_size is {expected_hidden}.\n"
+                "This adapter was not trained on this model."
+            )
+            sys.exit(1)
+
+    # --- Check intermediate dimension via gate_proj lora_B
+    #     (shape [intermediate_size, rank]) ---
+    expected_intermediate = config.intermediate_dim_orig or config.intermediate_dim
+    b_info = _find(0, "mlp.gate_proj", "B")
+    if b_info is not None:
+        rows = b_info["shape"][0]  # [out_features, rank]
+        if rows != expected_intermediate:
+            print(
+                f"Error: adapter gate_proj lora_B has output dim {rows} but "
+                f"the base model intermediate_size is {expected_intermediate}.\n"
+                "This adapter was not trained on this model."
+            )
+            sys.exit(1)
+
+
 def compute_base_model_hash(model_dir):
     """Compute a stable hash from the base model's identifying config fields.
 
@@ -805,6 +874,7 @@ def main():
         if not os.path.isdir(adapter_dir):
             print(f"Error: adapter directory not found: {adapter_dir}")
             sys.exit(1)
+        _validate_adapter_dims(adapter_dir, config)
         adapter_output_dir = _make_adapter_output_dir(adapter_dir)
         print(f"\n  Adapter output: {adapter_output_dir}")
 

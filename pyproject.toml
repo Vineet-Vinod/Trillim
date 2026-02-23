@@ -1,6 +1,6 @@
 [project]
 name = "trillim"
-version = "0.2.1"
+version = "0.2.2"
 description = "The fastest inference framework to run BitNet models on CPUs"
 readme = "README.md"
 license = {file = "LICENSE"}
