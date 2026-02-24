@@ -13,4 +13,4 @@ def now() -> int:
     return int(time.time())
 
 
-from trillim.inference import load_default_params  # re-export
+from trillim.utils import load_default_params  # re-export

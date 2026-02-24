@@ -86,7 +86,7 @@ def validate_adapter_model_compat(adapter_dir: str, model_dir: str) -> None:
     is missing the v2 ``base_model_config_hash`` field (old format) or if
     the stored hash doesn't match the current base model.
     """
-    from trillim.quantize import compute_base_model_hash
+    from trillim.utils import compute_base_model_hash
 
     cfg_path = os.path.join(adapter_dir, "trillim_config.json")
     if not os.path.exists(cfg_path):
@@ -203,7 +203,7 @@ def _scan_models_dir() -> tuple[list[dict], list[dict]]:
 
             if has_config:
                 # Compute config hash so adapters can be matched to this model
-                from trillim.quantize import compute_base_model_hash
+                from trillim.utils import compute_base_model_hash
                 info["base_model_config_hash"] = compute_base_model_hash(str(model_dir))
                 # Full model — report qmodel.tensors size
                 tensors_path = model_dir / "qmodel.tensors"

@@ -15,7 +15,6 @@ Usage:
     trillim quantize <model_dir> --model --adapter <adapter_dir>  # both -TRNQ/ dirs
 """
 
-import hashlib
 import json
 import os
 import re
@@ -25,6 +24,7 @@ import subprocess
 import tempfile
 
 from trillim.model_arch import LORA_TARGETS, ModelConfig
+from trillim.utils import compute_base_model_hash
 
 
 # ---------------------------------------------------------------------------
@@ -811,35 +811,6 @@ def _validate_adapter_dims(adapter_dir, config):
                 f"the base model intermediate_size is {expected_intermediate}. "
                 "This adapter was not trained on this model."
             )
-
-
-def compute_base_model_hash(model_dir):
-    """Compute a stable hash from the base model's identifying config fields.
-
-    Returns a hex SHA-256 digest string, or "" if config.json cannot be read.
-    """
-    config_path = os.path.join(model_dir, "config.json")
-    if not os.path.exists(config_path):
-        return ""
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return ""
-
-    # Extract the fields that uniquely identify a model architecture.
-    # Sorted keys + json.dumps(sort_keys=True) keeps the hash deterministic.
-    identity = {
-        "architectures": raw.get("architectures", []),
-        "hidden_size": raw.get("hidden_size"),
-        "intermediate_size": raw.get("intermediate_size"),
-        "num_hidden_layers": raw.get("num_hidden_layers"),
-        "num_attention_heads": raw.get("num_attention_heads"),
-        "num_key_value_heads": raw.get("num_key_value_heads"),
-        "vocab_size": raw.get("vocab_size"),
-    }
-    blob = json.dumps(identity, sort_keys=True).encode()
-    return hashlib.sha256(blob).hexdigest()
 
 
 def _write_trillim_model_config(output_dir, config, model_dir):

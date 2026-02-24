@@ -66,7 +66,7 @@ class InferenceEngine:
 
     async def start(self):
         """Launch the C++ inference subprocess."""
-        from trillim.inference import _build_init_config, load_engine_options
+        from trillim.utils import _build_init_config, load_engine_options
 
         if self.adapter_dir:
             trillim_cfg_path = os.path.join(self.adapter_dir, "trillim_config.json")
@@ -193,7 +193,7 @@ class InferenceEngine:
             self._last_cache_hit = match_len
 
             # Build count-prefixed key=value request block
-            from trillim.inference import _build_request_block
+            from trillim.utils import _build_request_block
 
             req_block = _build_request_block(
                 delta_tokens, reset_flag,
@@ -301,7 +301,7 @@ class LLM(Component):
 
     async def start(self) -> None:
         from trillim.model_arch import ModelConfig as ArchConfig
-        from trillim.inference import load_tokenizer
+        from trillim.utils import load_tokenizer
 
         self._swap_lock = asyncio.Lock()
 
@@ -343,7 +343,7 @@ class LLM(Component):
         unembed_quant: str | None = None,
     ) -> LoadModelResponse:
         from trillim.model_arch import ModelConfig as ArchConfig
-        from trillim.inference import load_tokenizer
+        from trillim.utils import load_tokenizer
         from trillim.model_store import resolve_model_dir
 
         # Resolve adapter_dir if provided
