@@ -122,8 +122,12 @@ def validate_adapter_model_compat(adapter_dir: str, model_dir: str) -> None:
         )
 
 
-def pull_model(model_id: str, revision: str | None = None, token: str | None = None, force: bool = False) -> Path:
-    """Download a pre-quantized model from HuggingFace."""
+def pull_model(model_id: str, revision: str | None = None, force: bool = False) -> Path:
+    """Download a pre-quantized model from HuggingFace.
+
+    Authentication is handled by ``huggingface_hub`` automatically — it reads
+    the token stored by ``hf auth login``.
+    """
     local_dir = MODELS_DIR / model_id
 
     if local_dir.is_dir() and not force:
@@ -142,15 +146,16 @@ def pull_model(model_id: str, revision: str | None = None, token: str | None = N
             model_id,
             local_dir=str(local_dir),
             revision=revision,
-            token=token,
         )
     except Exception as e:
         cls_name = type(e).__name__
         if cls_name == "RepositoryNotFoundError":
-            raise RuntimeError(f"Repository '{model_id}' not found on HuggingFace") from e
+            raise RuntimeError(
+                f"Repository '{model_id}' not found on HuggingFace"
+            ) from e
         elif cls_name == "GatedRepoError":
             raise RuntimeError(
-                f"'{model_id}' is a gated repository. Pass --token or run: hf auth login"
+                f"'{model_id}' is a gated repository. Authenticate with: hf auth login"
             ) from e
         else:
             raise
@@ -179,8 +184,11 @@ def _local_model_ids() -> set[str]:
     return ids
 
 
-def list_available_models(org: str = "Trillim", token: str | None = None) -> list[dict]:
+def list_available_models(org: str = "Trillim") -> list[dict]:
     """List models available on HuggingFace for *org*.
+
+    Authentication is handled by ``huggingface_hub`` automatically — it reads
+    the token stored by ``hf auth login``.
 
     Returns a list of dicts with keys:
         model_id, type ("model"|"adapter"), downloads, last_modified, base_model, local
@@ -188,20 +196,24 @@ def list_available_models(org: str = "Trillim", token: str | None = None) -> lis
     try:
         from huggingface_hub import list_models
     except ImportError:
-        raise RuntimeError("huggingface_hub is required. Install it with: pip install huggingface_hub/uv add huggingface_hub")
+        raise RuntimeError(
+            "huggingface_hub is required. Install it with: pip install huggingface_hub/uv add huggingface_hub"
+        )
 
     local_ids = _local_model_ids()
     results: list[dict] = []
 
     try:
-        for repo in list_models(author=org, full=True, token=token):
+        for repo in list_models(author=org, full=True):
             files = [s.rfilename for s in (repo.siblings or [])]
             entry_type = "adapter" if "qmodel.lora" in files else "model"
 
             # Extract base_model from HF tags (skip quantized: and adapter: prefixed variants)
             base_model = ""
-            for tag in (repo.tags or []):
-                if tag.startswith("base_model:") and not tag.startswith(("base_model:quantized:", "base_model:adapter:")):
+            for tag in repo.tags or []:
+                if tag.startswith("base_model:") and not tag.startswith(
+                    ("base_model:quantized:", "base_model:adapter:")
+                ):
                     base_model = tag.split(":", 1)[1]
                     break
 
@@ -209,14 +221,16 @@ def list_available_models(org: str = "Trillim", token: str | None = None) -> lis
             if repo.last_modified:
                 last_modified = repo.last_modified.strftime("%Y-%m-%d")
 
-            results.append({
-                "model_id": repo.id,
-                "type": entry_type,
-                "downloads": repo.downloads or 0,
-                "last_modified": last_modified,
-                "base_model": base_model,
-                "local": repo.id in local_ids,
-            })
+            results.append(
+                {
+                    "model_id": repo.id,
+                    "type": entry_type,
+                    "downloads": repo.downloads or 0,
+                    "last_modified": last_modified,
+                    "base_model": base_model,
+                    "local": repo.id in local_ids,
+                }
+            )
     except Exception as e:
         cls_name = type(e).__name__
         if cls_name in ("ConnectionError", "HfHubHTTPError"):
@@ -263,13 +277,16 @@ def _scan_models_dir() -> tuple[list[dict], list[dict]]:
                     info["architecture"] = tc.get("architecture", "")
                     info["source_model"] = tc.get("source_model", "")
                     info["quantization"] = tc.get("quantization", "")
-                    info["base_model_config_hash"] = tc.get("base_model_config_hash", "")
+                    info["base_model_config_hash"] = tc.get(
+                        "base_model_config_hash", ""
+                    )
                 except (json.JSONDecodeError, OSError):
                     pass
 
             if has_config:
                 # Compute config hash so adapters can be matched to this model
                 from trillim.utils import compute_base_model_hash
+
                 info["base_model_config_hash"] = compute_base_model_hash(str(model_dir))
                 # Full model — report qmodel.tensors size
                 tensors_path = model_dir / "qmodel.tensors"
@@ -312,6 +329,10 @@ def _human_size(n: int) -> str:
     """Format bytes as a human-readable string."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}".rstrip("0").rstrip(".")
+            return (
+                f"{n:.0f} {unit}"
+                if unit == "B"
+                else f"{n:.1f} {unit}".rstrip("0").rstrip(".")
+            )
         n /= 1024
     return f"{n:.1f} PB"

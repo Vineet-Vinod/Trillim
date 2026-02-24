@@ -90,7 +90,6 @@ def _cmd_pull(args):
         pull_model(
             args.model_id,
             revision=args.revision,
-            token=args.token,
             force=args.force,
         )
     except RuntimeError as e:
@@ -199,7 +198,7 @@ def _cmd_list(args):
     try:
         from trillim.model_store import list_available_models
 
-        entries = list_available_models(token=args.token)
+        entries = list_available_models()
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -277,7 +276,6 @@ def main():
     p_pull = sub.add_parser("pull", help="Download a pre-quantized model from HuggingFace")
     p_pull.add_argument("model_id", help="HuggingFace model ID (e.g. Trillim/BitNet-3B-TRNQ)")
     p_pull.add_argument("--revision", help="Branch, tag, or commit hash")
-    p_pull.add_argument("--token", help="HuggingFace token for gated/private repos")
     p_pull.add_argument("--force", "-f", action="store_true", help="Re-download even if exists")
     p_pull.set_defaults(func=_cmd_pull)
 
@@ -289,7 +287,6 @@ def main():
     # --- list ---
     p_list = sub.add_parser("list", help="List models available on HuggingFace")
     p_list.add_argument("--json", action="store_true", help="Output as JSON")
-    p_list.add_argument("--token", help="HuggingFace token for private repos")
     p_list.set_defaults(func=_cmd_list)
 
     args = parser.parse_args()
