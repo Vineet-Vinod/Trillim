@@ -173,7 +173,7 @@ def main():
     # --- quantize ---
     p_quant = sub.add_parser("quantize", help="Quantize safetensors and/or extract LoRA adapter")
     p_quant.add_argument("model_dir", help="Path to model directory with config.json")
-    p_quant.add_argument("--model", action="store_true", help="Quantize model weights (safetensors → qmodel.tensors + rope.cache)")
+    p_quant.add_argument("--model", action="store_true", help="Quantize model weights → <model_dir>-TRNQ/")
     p_quant.add_argument("--adapter", help="Extract LoRA adapter from PEFT directory → qmodel.lora")
     p_quant.set_defaults(func=_cmd_quantize)
 

@@ -10,9 +10,9 @@ Also provides safetensor I/O utilities (shard discovery, header parsing, tensor
 ordering) and the binary manifest builder used by the C++ quantizer.
 
 Usage:
-    trillim quantize <model_dir> --model                          # weights + rope
-    trillim quantize <model_dir> --adapter <adapter_dir>          # LoRA only
-    trillim quantize <model_dir> --model --adapter <adapter_dir>  # both
+    trillim quantize <model_dir> --model                          # → <model_dir>-TRNQ/
+    trillim quantize <model_dir> --adapter <adapter_dir>          # → <adapter_dir>-TRNQ/
+    trillim quantize <model_dir> --model --adapter <adapter_dir>  # both -TRNQ/ dirs
 """
 
 import hashlib
@@ -528,17 +528,23 @@ def _find_quantize_binary():
     return quantize_bin()
 
 
-def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
+def _run_cpp_quantizer(binary_path, model_dir, config, model_output_dir, adapter_dir=None,
                        adapter_output_dir=None):
     """Invoke the C++ quantizer to produce qmodel.tensors, rope.cache, and/or qmodel.lora."""
+    if model_output_dir and os.path.realpath(model_output_dir) == os.path.realpath(model_dir):
+        raise ValueError("model_output_dir and model_dir resolve to the same path.")
+
     print("  Writing binary manifest...")
-    manifest_path = write_manifest(model_dir, config, adapter_dir=adapter_dir)
+    manifest_path = write_manifest(
+        model_dir, config, adapter_dir=adapter_dir,
+        manifest_dir=model_output_dir,
+    )
     print(f"  Manifest: {manifest_path}")
 
     cmd = [
         binary_path,
         "--manifest", manifest_path,
-        "--output", os.path.join(model_dir, "qmodel.tensors"),
+        "--output", os.path.join(model_output_dir, "qmodel.tensors"),
         "--arch", str(int(config.arch_type)),
         "--hidden-dim", str(config.hidden_dim),
         "--intermediate-dim", str(config.intermediate_dim),
@@ -558,7 +564,7 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
     max_pos = raw_config.get("max_position_embeddings", 4096)
 
     cmd += [
-        "--rope-output", os.path.join(model_dir, "rope.cache"),
+        "--rope-output", os.path.join(model_output_dir, "rope.cache"),
         "--rope-theta", str(rope_theta),
         "--max-pos", str(max_pos),
         "--head-dim", str(config.head_dim),
@@ -587,7 +593,7 @@ def _run_cpp_quantizer(binary_path, model_dir, config, adapter_dir=None,
             raise RuntimeError(f"C++ quantizer exited with code {result.returncode}")
     finally:
         # Clean up manifest and any leftover .tmp from a killed quantizer
-        output_tmp = os.path.join(model_dir, "qmodel.tensors.tmp")
+        output_tmp = os.path.join(model_output_dir, "qmodel.tensors.tmp")
         for path in (manifest_path, output_tmp):
             if os.path.exists(path):
                 os.remove(path)
@@ -694,6 +700,49 @@ def _make_adapter_output_dir(adapter_dir):
     return output_dir
 
 
+def _make_model_output_dir(model_dir):
+    """Create a -TRNQ output directory for the quantized model.
+
+    Takes the model directory name, appends -TRNQ, and creates it as a
+    sibling directory.  Returns the absolute path.
+    """
+    model_dir = os.path.abspath(model_dir)
+    base = model_dir.rstrip("/")
+    output_dir = base + "-TRNQ"
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _copy_model_files(model_dir, output_dir):
+    """Copy non-weight files from model_dir to the TRNQ output directory.
+
+    Copies everything needed for inference (config.json, tokenizer files,
+    generation_config.json, chat templates, custom tokenizer code, etc.)
+    while skipping large weight files and quantization artifacts that are
+    generated fresh.
+    """
+    skip_patterns = [
+        "qmodel",
+        "rope.cache",
+        ".quantize_manifest.bin",
+        "safetensors",
+    ]
+
+    for entry in os.listdir(model_dir):
+        if any(pattern in entry for pattern in skip_patterns):
+            continue
+
+        src = os.path.join(model_dir, entry)
+        dst = os.path.join(output_dir, entry)
+
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+        elif os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+
+
 def _validate_adapter_dims(adapter_dir, config):
     """Check that LoRA tensor dimensions are compatible with the model config.
 
@@ -792,6 +841,35 @@ def compute_base_model_hash(model_dir):
     return hashlib.sha256(blob).hexdigest()
 
 
+def _write_trillim_model_config(output_dir, config, model_dir):
+    """Write trillim_config.json into the quantized model output directory."""
+    # Try to read source_model from the model's config.json
+    source_model = ""
+    config_path = os.path.join(model_dir, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path, encoding="utf-8") as f:
+            raw = json.load(f)
+        # Use _name_or_path if available (set by HuggingFace on download)
+        source_model = raw.get("_name_or_path", "")
+
+    trillim_cfg = {
+        "trillim_version": "0.2.0",
+        "format_version": 2,
+        "type": "model",
+        "quantization": "ternary",
+        "source_model": source_model,
+        "architecture": config.arch_type.name.lower(),
+        "platforms": ["x86_64", "aarch64"],
+        "base_model_config_hash": compute_base_model_hash(model_dir),
+    }
+
+    cfg_path = os.path.join(output_dir, "trillim_config.json")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(trillim_cfg, f, indent=2)
+        f.write("\n")
+    print(f"  Written: {cfg_path}")
+
+
 def _write_trillim_adapter_config(output_dir, config, adapter_dir, model_dir):
     """Write trillim_config.json into the quantized adapter output directory."""
     # Try to read source_model from the base model's config.json
@@ -803,7 +881,7 @@ def _write_trillim_adapter_config(output_dir, config, adapter_dir, model_dir):
         source_model = acfg.get("base_model_name_or_path", "")
 
     trillim_cfg = {
-        "trillim_version": "0.1.0",
+        "trillim_version": "0.2.0",
         "format_version": 2,
         "type": "lora_adapter",
         "quantization": "ternary",
@@ -831,7 +909,7 @@ def main():
     parser.add_argument("model_dir", help="Path to model directory with config.json")
     parser.add_argument(
         "--model", action="store_true",
-        help="Quantize model weights (safetensors → qmodel.tensors + rope.cache)",
+        help="Quantize model weights → <model_dir>-TRNQ/",
     )
     parser.add_argument(
         "--adapter",
@@ -867,8 +945,14 @@ def main():
     print(f"  Num layers: {config.num_layers}")
     print(f"  Num heads: {config.num_heads}")
 
-    # Set up adapter output directory
+    # Set up output directories
     adapter_output_dir = None
+    model_output_dir = None
+
+    if args.model:
+        model_output_dir = _make_model_output_dir(model_dir)
+        print(f"\n  Model output: {model_output_dir}")
+
     if args.adapter:
         adapter_dir = args.adapter
         if not os.path.isdir(adapter_dir):
@@ -885,19 +969,23 @@ def main():
         print("-" * 60)
 
         _run_cpp_quantizer(
-            binary_path, model_dir, config,
+            binary_path, model_dir, config, model_output_dir,
             adapter_dir=args.adapter if args.adapter else None,
             adapter_output_dir=adapter_output_dir,
         )
 
-        qmodel_path = os.path.join(model_dir, "qmodel.tensors")
-        rope_path = os.path.join(model_dir, "rope.cache")
+        qmodel_path = os.path.join(model_output_dir, "qmodel.tensors")
+        rope_path = os.path.join(model_output_dir, "rope.cache")
         print(f"\n  Written: {qmodel_path}")
         print(f"  Written: {rope_path}")
 
         if args.adapter:
             lora_path = os.path.join(adapter_output_dir, "qmodel.lora")
             print(f"  Written: {lora_path}")
+
+        # Copy model files and write config to TRNQ dir
+        _copy_model_files(model_dir, model_output_dir)
+        _write_trillim_model_config(model_output_dir, config, model_dir)
 
     elif args.adapter:
         # LoRA-only extraction
@@ -920,7 +1008,13 @@ def main():
 
     print("\n" + "=" * 60)
     print("Done!")
-    if adapter_output_dir:
+    if model_output_dir:
+        print(f"\nQuantized model ready at: {model_output_dir}")
+        if adapter_output_dir:
+            print(f"Usage: trillim chat {model_output_dir} --lora {adapter_output_dir}")
+        else:
+            print(f"Usage: trillim chat {model_output_dir}")
+    elif adapter_output_dir:
         print(f"\nQuantized adapter ready at: {adapter_output_dir}")
         print(f"Usage: trillim chat {model_dir} --lora {adapter_output_dir}")
     print("=" * 60)
