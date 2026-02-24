@@ -574,6 +574,8 @@ def _run_cpp_quantizer(binary_path, model_dir, config, model_output_dir, adapter
     if adapter_dir:
         if not adapter_output_dir:
             raise ValueError("adapter_output_dir is required when adapter_dir is set")
+        if os.path.realpath(adapter_output_dir) == os.path.realpath(adapter_dir):
+            raise ValueError("adapter_output_dir and adapter_dir resolve to the same path.")
         adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
         with open(adapter_config_path, encoding="utf-8") as f:
             adapter_config = json.load(f)
@@ -602,6 +604,9 @@ def _run_cpp_quantizer(binary_path, model_dir, config, model_output_dir, adapter
 def _run_cpp_lora_only(binary_path, model_dir, config, adapter_dir,
                        adapter_output_dir):
     """Invoke the C++ quantizer for LoRA-only extraction (no model tensors)."""
+    if os.path.realpath(adapter_output_dir) == os.path.realpath(adapter_dir):
+        raise ValueError("adapter_output_dir and adapter_dir resolve to the same path.")
+
     print("  Writing LoRA manifest...")
     manifest_path = write_manifest(model_dir, config, adapter_dir=adapter_dir, skip_model=True,
                                    manifest_dir=adapter_output_dir)
@@ -960,7 +965,7 @@ def main():
             sys.exit(1)
         _validate_adapter_dims(adapter_dir, config)
         adapter_output_dir = _make_adapter_output_dir(adapter_dir)
-        print(f"\n  Adapter output: {adapter_output_dir}")
+        print(f"  Adapter output: {adapter_output_dir}")
 
     if args.model:
         # Quantize model weights (+ LoRA if adapter provided)
@@ -1001,7 +1006,7 @@ def main():
         lora_path = os.path.join(adapter_output_dir, "qmodel.lora")
         print(f"\n  Written: {lora_path}")
 
-    # Copy tokenizer files and write trillim_config.json to output dir
+    # Copy tokenizer files and write trillim_config.json to adapter output dir
     if args.adapter:
         _copy_adapter_tokenizer_files(args.adapter, adapter_output_dir)
         _write_trillim_adapter_config(adapter_output_dir, config, args.adapter, model_dir)
