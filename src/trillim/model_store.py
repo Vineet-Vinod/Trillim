@@ -160,6 +160,72 @@ def pull_model(model_id: str, revision: str | None = None, token: str | None = N
     return local_dir
 
 
+def _local_model_ids() -> set[str]:
+    """Return the set of 'org/name' strings present in MODELS_DIR.
+
+    Lightweight alternative to ``_scan_models_dir()`` — no JSON parsing,
+    no imports, no hash computation.
+    """
+    ids: set[str] = set()
+    if not MODELS_DIR.is_dir():
+        return ids
+    for org_dir in MODELS_DIR.iterdir():
+        if not org_dir.is_dir():
+            continue
+        for model_dir in org_dir.iterdir():
+            if not model_dir.is_dir():
+                continue
+            ids.add(f"{org_dir.name}/{model_dir.name}")
+    return ids
+
+
+def list_available_models(org: str = "Trillim", token: str | None = None) -> list[dict]:
+    """List models available on HuggingFace for *org*.
+
+    Returns a list of dicts with keys:
+        model_id, type ("model"|"adapter"), downloads, last_modified, base_model, local
+    """
+    try:
+        from huggingface_hub import list_models
+    except ImportError:
+        raise RuntimeError("huggingface_hub is required. Install it with: pip install huggingface_hub/uv add huggingface_hub")
+
+    local_ids = _local_model_ids()
+    results: list[dict] = []
+
+    try:
+        for repo in list_models(author=org, full=True, token=token):
+            files = [s.rfilename for s in (repo.siblings or [])]
+            entry_type = "adapter" if "qmodel.lora" in files else "model"
+
+            # Extract base_model from HF tags (skip quantized: and adapter: prefixed variants)
+            base_model = ""
+            for tag in (repo.tags or []):
+                if tag.startswith("base_model:") and not tag.startswith(("base_model:quantized:", "base_model:adapter:")):
+                    base_model = tag.split(":", 1)[1]
+                    break
+
+            last_modified = ""
+            if repo.last_modified:
+                last_modified = repo.last_modified.strftime("%Y-%m-%d")
+
+            results.append({
+                "model_id": repo.id,
+                "type": entry_type,
+                "downloads": repo.downloads or 0,
+                "last_modified": last_modified,
+                "base_model": base_model,
+                "local": repo.id in local_ids,
+            })
+    except Exception as e:
+        cls_name = type(e).__name__
+        if cls_name in ("ConnectionError", "HfHubHTTPError"):
+            raise RuntimeError(f"Failed to fetch models from HuggingFace: {e}") from e
+        raise
+
+    return results
+
+
 def _scan_models_dir() -> tuple[list[dict], list[dict]]:
     """Scan MODELS_DIR and return (models, adapters).
 

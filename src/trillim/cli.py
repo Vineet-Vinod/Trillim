@@ -163,6 +163,66 @@ def _cmd_models(args):
                 print(f"{pad}{extra}")
 
 
+def _print_available_table(title: str, entries: list[dict]) -> None:
+    """Print a formatted table of available HuggingFace models or adapters."""
+    if not entries:
+        return
+
+    id_w = max(max(len(e["model_id"]) for e in entries), len("MODEL ID"))
+    base_w = max(max(len(e.get("base_model", "")) for e in entries), len("BASE MODEL"))
+    pulls_w = 7  # "  PULLS"
+    mod_w = 10   # "MODIFIED"
+    status_w = 6  # "STATUS"
+
+    print(title)
+    header = (
+        f"{'MODEL ID':<{id_w}}  {'BASE MODEL':<{base_w}}  "
+        f"{'PULLS':>{pulls_w}}  {'MODIFIED':<{mod_w}}  {'STATUS':<{status_w}}"
+    )
+    sep = (
+        f"{'-' * id_w}  {'-' * base_w}  "
+        f"{'-' * pulls_w}  {'-' * mod_w}  {'-' * status_w}"
+    )
+    print(header)
+    print(sep)
+    for e in entries:
+        status = "local" if e.get("local") else ""
+        base = e.get("base_model", "")
+        print(
+            f"{e['model_id']:<{id_w}}  {base:<{base_w}}  "
+            f"{e['downloads']:>{pulls_w}}  {e['last_modified']:<{mod_w}}  {status:<{status_w}}"
+        )
+
+
+def _cmd_list(args):
+    """List models available on HuggingFace."""
+    try:
+        from trillim.model_store import list_available_models
+
+        entries = list_available_models(token=args.token)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(entries, indent=2))
+        return
+
+    models = [e for e in entries if e["type"] == "model"]
+    adapters = [e for e in entries if e["type"] == "adapter"]
+
+    if not models and not adapters:
+        print("No models found in the Trillim organization.")
+        return
+
+    if models:
+        _print_available_table("Models", models)
+    if adapters:
+        if models:
+            print()
+        _print_available_table("Adapters", adapters)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="trillim",
@@ -225,6 +285,12 @@ def main():
     p_models = sub.add_parser("models", help="List locally downloaded models")
     p_models.add_argument("--json", action="store_true", help="Output as JSON")
     p_models.set_defaults(func=_cmd_models)
+
+    # --- list ---
+    p_list = sub.add_parser("list", help="List models available on HuggingFace")
+    p_list.add_argument("--json", action="store_true", help="Output as JSON")
+    p_list.add_argument("--token", help="HuggingFace token for private repos")
+    p_list.set_defaults(func=_cmd_list)
 
     args = parser.parse_args()
     if not args.command:
