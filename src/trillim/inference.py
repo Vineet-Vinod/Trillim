@@ -2,10 +2,12 @@
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 
-from trillim.model_arch import ModelConfig as ArchConfig
 from prompt_toolkit import prompt as better_input
+from prompt_toolkit.key_binding import KeyBindings
+from trillim.model_arch import ModelConfig as ArchConfig
 from trillim.token_utils import IncrementalDecoder
 from trillim.utils import (
     load_tokenizer,
@@ -16,6 +18,29 @@ from trillim.utils import (
 )
 
 _ENGINE_TIMEOUT = 300  # seconds; maximum wait for a single engine I/O operation
+
+
+def _make_key_bindings():
+    """Create key bindings for the chat prompt. Ctrl+G opens $EDITOR."""
+    kb = KeyBindings()
+
+    @kb.add("c-g")
+    def _open_editor(event):
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR", "vi")
+        buf = event.app.current_buffer
+        with tempfile.NamedTemporaryFile(suffix=".txt", mode="w+", delete=False) as f:
+            f.write(buf.text)
+            tmp_path = f.name
+        try:
+            subprocess.call([editor, tmp_path])
+            with open(tmp_path) as f:
+                text = f.read()
+            buf.text = text
+            buf.cursor_position = len(text)
+        finally:
+            os.unlink(tmp_path)
+
+    return kb
 
 
 def _readline_with_timeout(pipe, timeout):
@@ -151,10 +176,11 @@ def _run_chat_loop(model, tokenizer, arch_config, sampling_params):
     cached_prompt_str = ""
 
     model_name = os.path.basename(os.path.normpath(model.args[1]))
-    print(f"Talk to {model_name} (Ctrl+D or 'q' to quit, '/new' for new conversation)")
+    kb = _make_key_bindings()
+    print(f"Talk to {model_name} (Ctrl+D or 'q' to quit, '/new' for new conversation, Ctrl+G for editor)")
     while True:
         try:
-            query = better_input("> ")
+            query = better_input("> ", key_bindings=kb)
         except (EOFError, KeyboardInterrupt):
             query = "q"
 
