@@ -22,7 +22,6 @@ import re
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 
 from trillim.model_arch import LORA_TARGETS, ModelConfig
@@ -782,12 +781,11 @@ def _validate_adapter_dims(adapter_dir, config):
             max_layer = max(max_layer, int(m.group(1)))
 
     if max_layer >= 0 and (max_layer + 1) > config.num_layers:
-        print(
-            f"Error: adapter has weights for {max_layer + 1} layers but the "
-            f"base model only has {config.num_layers} layers.\n"
+        raise ValueError(
+            f"Adapter has weights for {max_layer + 1} layers but the "
+            f"base model only has {config.num_layers} layers. "
             "This adapter was not trained on this model."
         )
-        sys.exit(1)
 
     # --- Check hidden dimension via q_proj lora_A (shape [rank, hidden_size]) ---
     expected_hidden = config.hidden_dim_orig or config.hidden_dim
@@ -795,12 +793,11 @@ def _validate_adapter_dims(adapter_dir, config):
     if a_info is not None:
         cols = a_info["shape"][1]  # [rank, in_features]
         if cols != expected_hidden:
-            print(
-                f"Error: adapter q_proj lora_A has input dim {cols} but the "
-                f"base model hidden_size is {expected_hidden}.\n"
+            raise ValueError(
+                f"Adapter q_proj lora_A has input dim {cols} but the "
+                f"base model hidden_size is {expected_hidden}. "
                 "This adapter was not trained on this model."
             )
-            sys.exit(1)
 
     # --- Check intermediate dimension via gate_proj lora_B
     #     (shape [intermediate_size, rank]) ---
@@ -809,12 +806,11 @@ def _validate_adapter_dims(adapter_dir, config):
     if b_info is not None:
         rows = b_info["shape"][0]  # [out_features, rank]
         if rows != expected_intermediate:
-            print(
-                f"Error: adapter gate_proj lora_B has output dim {rows} but "
-                f"the base model intermediate_size is {expected_intermediate}.\n"
+            raise ValueError(
+                f"Adapter gate_proj lora_B has output dim {rows} but "
+                f"the base model intermediate_size is {expected_intermediate}. "
                 "This adapter was not trained on this model."
             )
-            sys.exit(1)
 
 
 def compute_base_model_hash(model_dir):
@@ -923,16 +919,14 @@ def main():
     args = parser.parse_args()
 
     if not args.model and not args.adapter:
-        print("Error: specify --model and/or --adapter <adapter_dir>")
         parser.print_help()
-        sys.exit(1)
+        raise ValueError("specify --model and/or --adapter <adapter_dir>")
 
     model_dir = args.model_dir
     config_path = os.path.join(model_dir, "config.json")
 
     if not os.path.exists(config_path):
-        print(f"Error: {config_path} not found.")
-        sys.exit(1)
+        raise FileNotFoundError(f"{config_path} not found.")
 
     binary_path = _find_quantize_binary()
 
@@ -961,8 +955,7 @@ def main():
     if args.adapter:
         adapter_dir = args.adapter
         if not os.path.isdir(adapter_dir):
-            print(f"Error: adapter directory not found: {adapter_dir}")
-            sys.exit(1)
+            raise FileNotFoundError(f"Adapter directory not found: {adapter_dir}")
         _validate_adapter_dims(adapter_dir, config)
         adapter_output_dir = _make_adapter_output_dir(adapter_dir)
         print(f"  Adapter output: {adapter_output_dir}")

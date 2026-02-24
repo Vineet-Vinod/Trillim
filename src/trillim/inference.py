@@ -274,8 +274,10 @@ def _build_request_block(
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: trillim chat <model_directory> [--lora <adapter_dir>] [--threads N] [--lora-quant TYPE] [--unembed-quant TYPE]")
-        sys.exit(1)
+        raise ValueError(
+            "Usage: trillim chat <model_directory> [--lora <adapter_dir>] "
+            "[--threads N] [--lora-quant TYPE] [--unembed-quant TYPE]"
+        )
 
     MODEL_PATH = sys.argv[1].strip()
     if len(MODEL_PATH) > 1 and MODEL_PATH[-1] == "/":
@@ -288,8 +290,7 @@ def main():
         if lora_idx + 1 < len(sys.argv) and not sys.argv[lora_idx + 1].startswith("--"):
             ADAPTER_DIR = sys.argv[lora_idx + 1]
         else:
-            print("Error: --lora requires an adapter directory path.")
-            sys.exit(1)
+            raise ValueError("--lora requires an adapter directory path.")
 
     TRUST_REMOTE_CODE = "--trust-remote-code" in sys.argv
     num_threads = 0
@@ -312,27 +313,19 @@ def main():
     if ADAPTER_DIR:
         trillim_cfg_path = os.path.join(ADAPTER_DIR, "trillim_config.json")
         if not os.path.exists(trillim_cfg_path):
-            print(
-                f"Error: {trillim_cfg_path} not found.\n"
-                "This adapter has not been quantized for Trillim.\n"
-                "Run: trillim quantize <model_dir> --adapter "
-                f"{ADAPTER_DIR}"
+            raise FileNotFoundError(
+                f"{trillim_cfg_path} not found. "
+                "This adapter has not been quantized for Trillim. "
+                f"Run: trillim quantize <model_dir> --adapter {ADAPTER_DIR}"
             )
-            sys.exit(1)
         lora_path = os.path.join(ADAPTER_DIR, "qmodel.lora")
         if not os.path.exists(lora_path):
-            print(
-                f"Error: --lora set but {lora_path} not found. "
-                "Run: trillim quantize <model_dir> --adapter "
-                f"{ADAPTER_DIR}"
+            raise FileNotFoundError(
+                f"--lora set but {lora_path} not found. "
+                f"Run: trillim quantize <model_dir> --adapter {ADAPTER_DIR}"
             )
-            sys.exit(1)
-        from trillim.model_store import AdapterCompatError, validate_adapter_model_compat
-        try:
-            validate_adapter_model_compat(ADAPTER_DIR, MODEL_PATH)
-        except AdapterCompatError as e:
-            print(f"Error: {e}")
-            sys.exit(1)
+        from trillim.model_store import validate_adapter_model_compat
+        validate_adapter_model_compat(ADAPTER_DIR, MODEL_PATH)
 
     try:
         tokenizer = load_tokenizer(MODEL_PATH, adapter_dir=ADAPTER_DIR, trust_remote_code=TRUST_REMOTE_CODE)

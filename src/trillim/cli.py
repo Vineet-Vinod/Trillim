@@ -31,7 +31,7 @@ def _cmd_quantize(args):
         from trillim.quantize import main
 
         main()
-    except (RuntimeError, ValueError) as e:
+    except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -58,7 +58,7 @@ def _cmd_chat(args):
         from trillim.inference import main
 
         main()
-    except (RuntimeError, ValueError) as e:
+    except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
