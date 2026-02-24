@@ -138,7 +138,7 @@ def _cmd_models(args):
             print()
 
         # Build hash → model ID(s) mapping for compatibility display
-        hash_to_models: defaultdict[str, list[str]] = defaultdict()
+        hash_to_models: defaultdict[str, list[str]] = defaultdict(list)
         for m in models:
             h = m.get("base_model_config_hash", "")
             hash_to_models[h].append(m["model_id"])
