@@ -197,10 +197,14 @@ def _scan_models_dir() -> tuple[list[dict], list[dict]]:
                     info["architecture"] = tc.get("architecture", "")
                     info["source_model"] = tc.get("source_model", "")
                     info["quantization"] = tc.get("quantization", "")
+                    info["base_model_config_hash"] = tc.get("base_model_config_hash", "")
                 except (json.JSONDecodeError, OSError):
                     pass
 
             if has_config:
+                # Compute config hash so adapters can be matched to this model
+                from trillim.quantize import compute_base_model_hash
+                info["base_model_config_hash"] = compute_base_model_hash(str(model_dir))
                 # Full model — report qmodel.tensors size
                 tensors_path = model_dir / "qmodel.tensors"
                 if tensors_path.exists():

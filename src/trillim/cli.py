@@ -6,6 +6,8 @@ import json
 import os
 import sys
 
+from collections import defaultdict
+
 
 def _resolve(args):
     """Resolve model_dir if it looks like a HuggingFace model ID."""
@@ -134,19 +136,31 @@ def _cmd_models(args):
     if adapters:
         if models:
             print()
+
+        # Build hash → model ID(s) mapping for compatibility display
+        hash_to_models: defaultdict[str, list[str]] = defaultdict()
+        for m in models:
+            h = m.get("base_model_config_hash", "")
+            hash_to_models[h].append(m["model_id"])
+
         id_w = max(len(a["model_id"]) for a in adapters)
         id_w = max(id_w, len("ADAPTER ID"))
         size_w = 8
 
         print("Adapters")
-        header = f"{'ADAPTER ID':<{id_w}}  {'SIZE':>{size_w}}  {'SOURCE'}"
+        header = f"{'ADAPTER ID':<{id_w}}  {'SIZE':>{size_w}}  {'COMPATIBLE MODELS'}"
         sep = f"{'-' * id_w}  {'-' * size_w}  {'-' * 30}"
         print(header)
         print(sep)
+        pad = f"{'':<{id_w}}  {'':>{size_w}}  "
         for a in adapters:
             size = a.get("size_human", "-")
-            source = a.get("source_model", "")
-            print(f"{a['model_id']:<{id_w}}  {size:>{size_w}}  {source}")
+            adapter_hash = a.get("base_model_config_hash", "")
+            compat = hash_to_models[adapter_hash] if adapter_hash else []
+            first_line = compat[0] if compat else "(none)"
+            print(f"{a['model_id']:<{id_w}}  {size:>{size_w}}  {first_line}")
+            for extra in compat[1:]:
+                print(f"{pad}{extra}")
 
 
 def main():
