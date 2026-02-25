@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from trillim.engine import InferenceEngine
 from trillim.token_utils import IncrementalDecoder
-from ._base import Harness, StepResult
+from ._base import Harness
 from ._search_utils import DuckDuckGoSearch, SearchError, extract_search_query
 
 
@@ -30,27 +30,6 @@ class SearchHarness(Harness):
         ):
             full_text += decoder.decode(token_id)
         return full_text
-
-    async def step(self, messages: list[dict], **sampling: Any) -> StepResult:
-        """Generate one response and execute search if requested.
-
-        Raises SearchError if search is needed but fails.
-        Does not modify messages if SearchError is raised.
-        """
-        full_text = await self._generate_buffered(messages, **sampling)
-
-        query = extract_search_query(full_text)
-        if query is None:
-            messages.append({"role": "assistant", "content": full_text})
-            self._update_cache(messages)
-            return StepResult(text=full_text, messages=messages, done=True)
-
-        # May raise SearchError — messages untouched in that case
-        results = await self._search.search(query)
-        messages.append({"role": "assistant", "content": full_text})
-        messages.append({"role": "search", "content": results})
-        self._update_cache(messages)
-        return StepResult(text=full_text, messages=messages, done=False)
 
     async def run(self, messages: list[dict], **sampling: Any) -> AsyncIterator[str]:
         """Orchestration loop: intermediate steps buffered, final step streamed.

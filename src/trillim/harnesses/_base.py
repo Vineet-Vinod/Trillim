@@ -4,25 +4,16 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 from trillim.engine import InferenceEngine
 
 
-@dataclass
-class StepResult:
-    """Result of a single harness step."""
-    text: str                    # what the model generated this step
-    messages: list[dict]         # updated message list (may include tool results)
-    done: bool                   # True = no more steps needed
-
-
 class Harness(abc.ABC):
     """Abstract base for inference harnesses that steer multi-step execution.
 
-    Subclasses implement step() for one iteration and run() for full orchestration.
+    Subclasses implement run() for full orchestration.
 
     Set DEBUG = True in source to print all intermediate generations.
     When False, intermediate steps emit only short sentinels.
@@ -42,22 +33,12 @@ class Harness(abc.ABC):
         return self.engine.arch_config
 
     @abc.abstractmethod
-    async def step(self, messages: list[dict], **sampling: Any) -> StepResult:
-        """One generation + optional tool execution (non-streaming).
-
-        Returns a StepResult with generated text, updated messages, and
-        whether execution is complete.
-        """
-        ...
-
-    @abc.abstractmethod
     async def run(self, messages: list[dict], **sampling: Any) -> AsyncIterator[str]:
         """Full orchestration loop. Yields text chunks to display.
 
-        Calls step() in a loop for multi-step harnesses. Streams the final
-        generation token-by-token. Updates messages in place (appends the
-        final assistant response). Updates engine._cached_prompt_str for
-        KV cache reuse on the next turn.
+        Streams the final generation token-by-token. Updates messages in
+        place (appends the final assistant response). Updates
+        engine._cached_prompt_str for KV cache reuse on the next turn.
         """
         ...
         yield  # type: ignore  # abstract async generator
