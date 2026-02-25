@@ -27,6 +27,8 @@ dependencies = [
     "uvicorn[standard]==0.40.0",
     "faster-whisper==1.2.1",
     "pocket-tts==1.0.3",
+    "trafilatura==2.0.0",
+    "ddgs==9.10.0",
 ]
 
 [project.optional-dependencies]
