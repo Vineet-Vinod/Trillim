@@ -3,9 +3,11 @@
 
 from ._base import Harness
 from ._default import DefaultHarness
+from ._search import SearchHarness
 
 HARNESS_REGISTRY: dict[str, type[Harness]] = {
     "default": DefaultHarness,
+    "search": SearchHarness,
 }
 
 
