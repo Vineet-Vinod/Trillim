@@ -305,7 +305,9 @@ class DDGSSearchProvider(SearchProvider):
         try:
             # Suppress C-level stderr from primp's impersonation warnings
             fd = os.dup(2)
-            os.dup2(os.open(os.devnull, os.O_WRONLY), 2)
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull_fd, 2)
+            os.close(devnull_fd)
             try:
                 raw_results = DDGS().text(query, max_results=self.max_results)
             finally:
