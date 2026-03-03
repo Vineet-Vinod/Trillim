@@ -23,6 +23,7 @@ class Harness(abc.ABC):
 
     def __init__(self, engine: InferenceEngine):
         self.engine = engine
+        self._last_completion_tokens = 0
 
     @property
     def tokenizer(self):

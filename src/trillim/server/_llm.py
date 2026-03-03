@@ -366,7 +366,7 @@ class LLM(Component):
                     continue
                 full_text += chunk
 
-            completion_tokens = len(tokenizer.encode(full_text, add_special_tokens=False))
+            completion_tokens = llm.harness._last_completion_tokens
 
             cached_tokens = llm.engine._last_cache_hit
 

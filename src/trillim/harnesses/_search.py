@@ -20,16 +20,18 @@ class SearchHarness(Harness):
         super().__init__(engine)
         self._search = SearchClient(provider_name=search_provider)
 
-    async def _generate_buffered(self, messages: list[dict], **sampling: Any) -> str:
+    async def _generate_buffered(self, messages: list[dict], **sampling: Any) -> tuple[str, int]:
         """Generate a full response non-streaming."""
         token_ids, prompt_str = self._prepare_tokens(messages)
         decoder = IncrementalDecoder(self.tokenizer)
         full_text = ""
+        completion_tokens = 0
         async for token_id in self.engine.generate(
             token_ids=token_ids, prompt_str=prompt_str, **sampling,
         ):
+            completion_tokens += 1
             full_text += decoder.decode(token_id)
-        return full_text
+        return full_text, completion_tokens
 
     async def run(self, messages: list[dict], **sampling: Any) -> AsyncIterator[str]:
         """Orchestration loop: intermediate steps buffered, final step streamed.
@@ -37,9 +39,10 @@ class SearchHarness(Harness):
         Yields sentinels ([Searching: ...], [Synthesizing...]) before model
         text so the CLI can distinguish them from the actual response.
         """
+        self._last_completion_tokens = 0
         yield "[Spin-Jump-Spinning...]\n"
         for i in range(self.MAX_SEARCH_ITERATIONS - 1):
-            full_text = await self._generate_buffered(messages, **sampling)
+            full_text, completion_tokens = await self._generate_buffered(messages, **sampling)
 
             if self.DEBUG:
                 yield f"\n--- Step {i + 1} ---\n{full_text}\n"
@@ -47,6 +50,7 @@ class SearchHarness(Harness):
             query = extract_search_query(full_text)
             if query is None:
                 # No search tag — yield buffered text as final response
+                self._last_completion_tokens = completion_tokens
                 yield full_text
                 messages.append({"role": "assistant", "content": full_text})
                 self._update_cache(messages)
@@ -80,6 +84,7 @@ class SearchHarness(Harness):
         async for token_id in self.engine.generate(
             token_ids=token_ids, prompt_str=prompt_str, **sampling,
         ):
+            self._last_completion_tokens += 1
             chunk = decoder.decode(token_id)
             full_text += chunk
             yield chunk

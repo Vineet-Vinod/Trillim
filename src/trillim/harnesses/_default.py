@@ -13,12 +13,14 @@ class DefaultHarness(Harness):
 
     async def run(self, messages: list[dict], **sampling: Any) -> AsyncIterator[str]:
         """Stream tokens directly from the engine."""
+        self._last_completion_tokens = 0
         token_ids, prompt_str = self._prepare_tokens(messages)
         decoder = IncrementalDecoder(self.tokenizer)
         full_text = ""
         async for token_id in self.engine.generate(
             token_ids=token_ids, prompt_str=prompt_str, **sampling,
         ):
+            self._last_completion_tokens += 1
             chunk = decoder.decode(token_id)
             full_text += chunk
             yield chunk
