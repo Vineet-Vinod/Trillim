@@ -825,8 +825,8 @@ def _write_trillim_model_config(output_dir, config, model_dir):
         source_model = raw.get("_name_or_path", "")
 
     trillim_cfg = {
-        "trillim_version": "0.2.0",
-        "format_version": 2,
+        "trillim_version": "0.3.0",
+        "format_version": 3,
         "type": "model",
         "quantization": "ternary",
         "source_model": source_model,
@@ -853,8 +853,8 @@ def _write_trillim_adapter_config(output_dir, config, adapter_dir, model_dir):
         source_model = acfg.get("base_model_name_or_path", "")
 
     trillim_cfg = {
-        "trillim_version": "0.2.0",
-        "format_version": 2,
+        "trillim_version": "0.3.0",
+        "format_version": 3,
         "type": "lora_adapter",
         "quantization": "ternary",
         "source_model": source_model,

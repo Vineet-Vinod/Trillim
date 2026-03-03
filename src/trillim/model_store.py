@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 MODELS_DIR = Path.home() / ".trillim" / "models"
-SUPPORTED_FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSION = 3
 
 _HF_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -101,7 +101,7 @@ def validate_adapter_model_compat(adapter_dir: str, model_dir: str) -> None:
     fmt_ver = cfg.get("format_version", 1)
     stored_hash = cfg.get("base_model_config_hash")
 
-    if fmt_ver < 2 or not stored_hash:
+    if fmt_ver < SUPPORTED_FORMAT_VERSION or not stored_hash:
         raise AdapterCompatError(
             f"This adapter ({adapter_dir}) uses an older format (v{fmt_ver}) "
             "that is no longer supported.\n"
