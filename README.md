@@ -7,6 +7,7 @@
 ### Installation
 
 - Python 3.12+ required
+- glibc 2.27+ required (if on Linux)
 - Install with [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 Pick your platform for full instructions:

@@ -4,6 +4,13 @@
 
 - x86_64 (AVX2) or ARM64 (NEON)
 - Python 3.12 or newer
+- glibc 2.27 or newer
+
+Check glibc:
+
+```bash
+ldd --version | head -n 1
+```
 
 ## 1. Check your Python version
 

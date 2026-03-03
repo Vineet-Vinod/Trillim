@@ -35,12 +35,12 @@ BINARIES = ["inference", "trillim-quantize"]
 PLATFORMS: dict[str, dict] = {
     "linux-x86_64": {
         "src": DARKNET / "executables",
-        "tag": "manylinux_2_17_x86_64.manylinux2014_x86_64",
+        "tag": "manylinux_2_27_x86_64.manylinux2014_x86_64",
         "exe_suffix": "",
     },
     "linux-arm64": {
         "src": DARKNET / "executables" / "linux-arm64",
-        "tag": "manylinux_2_17_aarch64.manylinux2014_aarch64",
+        "tag": "manylinux_2_27_aarch64.manylinux2014_aarch64",
         "exe_suffix": "",
     },
     "macos-x86_64": {
