@@ -90,23 +90,27 @@ class TTSEngine:
 
     DEFAULT_VOICE = "alba"
 
-    def __init__(self, voices_dir: Path | None = None):
+    def __init__(
+        self,
+        voices_dir: Path | None = None,
+        default_voice: str = DEFAULT_VOICE,
+    ):
         self._model = None
         self._voice_states: dict[str, dict] = {}
         self._custom_voice_files: dict[str, Path] = {}  # voice_id -> WAV path
         self._voices_dir = voices_dir
         self._lock = asyncio.Lock()
         self.sample_rate: int = 24000
+        self.default_voice: str = default_voice
 
     async def start(self) -> None:
         """Load the TTS model, default voice state, and discover saved voices."""
         loop = asyncio.get_running_loop()
-        self._model, default_state = await loop.run_in_executor(
+        self._model = await loop.run_in_executor(
             None,
             self._load,
         )
         self.sample_rate = self._model.sample_rate
-        self._voice_states[self.DEFAULT_VOICE] = default_state
 
         # Discover previously-saved custom voices (states loaded lazily)
         if self._voices_dir is not None:
@@ -115,6 +119,11 @@ class TTSEngine:
                 voice_id = wav.stem
                 if voice_id not in PREDEFINED_VOICES:
                     self._custom_voice_files[voice_id] = wav
+        self._voice_states[self.default_voice] = await loop.run_in_executor(
+            None,
+            self._get_voice_state,
+            self.default_voice,
+        )
 
     def _load(self):
         try:
@@ -131,8 +140,7 @@ class TTSEngine:
 
         model = TTSModel.load_model()
         model.eval()
-        state = model.get_state_for_audio_prompt(self.DEFAULT_VOICE)
-        return model, state
+        return model
 
     async def stop(self) -> None:
         self._model = None
@@ -140,7 +148,9 @@ class TTSEngine:
         self._custom_voice_files.clear()
 
     def _get_voice_state(self, voice: str | None) -> dict:
-        voice = voice or self.DEFAULT_VOICE
+        voice = voice or self.default_voice
+        if voice not in PREDEFINED_VOICES and voice not in self._custom_voice_files:
+            raise ValueError(f"Unknown voice: {voice}")
         if voice not in self._voice_states:
             if voice in self._custom_voice_files:
                 state = self._model.get_state_for_audio_prompt(
@@ -216,6 +226,8 @@ class TTSEngine:
             raise KeyError(f"Voice '{voice_id}' not found")
         path.unlink(missing_ok=True)
         self._voice_states.pop(voice_id, None)
+        if self.default_voice == voice_id:
+            self.default_voice = self.DEFAULT_VOICE
 
     # ----- Synthesis -----
 
@@ -290,15 +302,15 @@ class SentenceChunker:
 
     Example snippet::
 
-        from trillim.server import LLM, TTS, SentenceChunker
+        from trillim import LLM, TTS, SentenceChunker
 
         chunker = SentenceChunker()
         for token_text in llm_stream:
             for sentence in chunker.feed(token_text):
-                await tts.engine.synthesize_stream(sentence)
+                await tts.synthesize_stream(sentence)
         remaining = chunker.flush()
         if remaining:
-            await tts.engine.synthesize_stream(remaining)
+            await tts.synthesize_stream(remaining)
     """
 
     def __init__(self) -> None:
@@ -359,13 +371,21 @@ class SentenceChunker:
 class TTS(Component):
     """Text-to-speech component using pocket-tts."""
 
-    def __init__(self, voices_dir: str | Path = _DEFAULT_VOICES_DIR):
+    def __init__(
+        self,
+        voices_dir: str | Path = _DEFAULT_VOICES_DIR,
+        default_voice: str = TTSEngine.DEFAULT_VOICE,
+    ):
         self._voices_dir = Path(voices_dir)
         self._voices_dir.mkdir(parents=True, exist_ok=True)
         self._engine = None
+        self._default_voice = default_voice
 
     async def start(self) -> None:
-        self._engine = TTSEngine(voices_dir=self._voices_dir)
+        self._engine = TTSEngine(
+            voices_dir=self._voices_dir,
+            default_voice=self._default_voice,
+        )
         await self._engine.start()
 
     async def stop(self) -> None:
@@ -375,6 +395,69 @@ class TTS(Component):
     @property
     def engine(self):
         return self._engine
+
+    def _require_started(self) -> TTSEngine:
+        if self._engine is None:
+            raise RuntimeError("TTS not started")
+        return self._engine
+
+    @staticmethod
+    def _validate_input_text(text: str) -> None:
+        if not text.strip():
+            raise ValueError("input text is empty")
+
+    @property
+    def default_voice(self) -> str:
+        if self._engine is not None:
+            return self._engine.default_voice
+        return self._default_voice
+
+    @default_voice.setter
+    def default_voice(self, voice: str) -> None:
+        if not voice:
+            raise ValueError("default_voice must not be empty")
+        if self._engine is not None:
+            known = {entry["voice_id"] for entry in self._engine.list_voices()}
+            if voice not in known:
+                raise ValueError(f"Unknown voice: {voice}")
+            self._engine.default_voice = voice
+        self._default_voice = voice
+
+    @property
+    def sample_rate(self) -> int:
+        return self._require_started().sample_rate
+
+    def list_voices(self) -> list[dict]:
+        return self._require_started().list_voices()
+
+    async def register_voice(self, voice_id: str, audio_bytes: bytes) -> None:
+        await self._require_started().register_voice(voice_id, audio_bytes)
+
+    async def delete_voice(self, voice_id: str) -> None:
+        engine = self._require_started()
+        await engine.delete_voice(voice_id)
+        if self._default_voice == voice_id:
+            self._default_voice = engine.default_voice
+
+    async def synthesize_stream(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        self._validate_input_text(text)
+        engine = self._require_started()
+        async for chunk in engine.synthesize_stream(text, voice=voice):
+            yield chunk
+
+    async def synthesize_wav(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+    ) -> bytes:
+        self._validate_input_text(text)
+        return await self._require_started().synthesize_full(text, voice=voice)
 
     def router(self) -> APIRouter:
         docs_path = Path(__file__).resolve().parents[1] / "docs" / "server.md"
@@ -397,7 +480,7 @@ class TTS(Component):
             if tts._engine is None:
                 raise HTTPException(status_code=503, detail="TTS engine not started")
             return VoiceListResponse(
-                voices=[VoiceInfo(**v) for v in tts._engine.list_voices()],
+                voices=[VoiceInfo(**v) for v in tts.list_voices()],
             )
 
         @r.post("/v1/voices")
@@ -411,7 +494,7 @@ class TTS(Component):
             if len(audio_bytes) > 8 * 1024 * 1024:
                 raise HTTPException(status_code=413, detail="Upload exceeds 8 MB limit")
             try:
-                await tts._engine.register_voice(voice_id, audio_bytes)
+                await tts.register_voice(voice_id, audio_bytes)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             return VoiceCreateResponse(voice_id=voice_id, status="created")
@@ -421,7 +504,7 @@ class TTS(Component):
             if tts._engine is None:
                 raise HTTPException(status_code=503, detail="TTS engine not started")
             try:
-                await tts._engine.delete_voice(voice_id)
+                await tts.delete_voice(voice_id)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             except KeyError as exc:
@@ -437,13 +520,13 @@ class TTS(Component):
 
             if req.response_format == "pcm":
                 return StreamingResponse(
-                    tts._engine.synthesize_stream(req.input, voice=req.voice),
+                    tts.synthesize_stream(req.input, voice=req.voice),
                     media_type="audio/pcm",
                 )
 
             async def _wav_stream():
-                yield wav_header(tts._engine.sample_rate)
-                async for chunk in tts._engine.synthesize_stream(
+                yield wav_header(tts.sample_rate)
+                async for chunk in tts.synthesize_stream(
                     req.input,
                     voice=req.voice,
                 ):
