@@ -27,6 +27,7 @@ from ._models import (
     UsageInfo,
 )
 
+from trillim._timeouts import run_with_timeout
 from trillim.errors import ContextOverflowError
 from trillim.engine import InferenceEngine
 from trillim.events import (
@@ -195,14 +196,19 @@ class LLM(Component):
         top_p: float | None = None,
         repetition_penalty: float | None = None,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> str:
-        full_text, _ = await self._collect_chat(
-            messages,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            max_tokens=max_tokens,
+        full_text, _ = await run_with_timeout(
+            self._collect_chat(
+                messages,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                max_tokens=max_tokens,
+            ),
+            timeout,
+            "LLM chat",
         )
         return full_text
 
