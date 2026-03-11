@@ -29,9 +29,8 @@ async def main():
     await llm.start()
     try:
         messages = [{"role": "user", "content": "Write a one-line haiku about CPUs."}]
-        async for chunk in llm.harness.run(messages):
-            print(chunk, end="", flush=True)
-        print()
+        reply = await llm.chat(messages)
+        print(reply)
     finally:
         await llm.stop()
 
@@ -53,7 +52,21 @@ except ContextOverflowError as exc:
     print(exc)
 ```
 
-`llm.harness.run(...)` remains available as an advanced interface for chat-style flows.
+Use `llm.stream_chat(...)` when you want structured progress events:
+
+```python
+async for event in llm.stream_chat(messages):
+    if event.type == "search_started":
+        print(f"Searching for: {event.query}")
+    elif event.type == "search_result":
+        print(f"Search available: {event.available}")
+    elif event.type == "token":
+        print(event.text, end="", flush=True)
+    elif event.type == "final_text":
+        print(f"\nFinal: {event.text}")
+```
+
+`llm.harness.run(...)` remains available as an advanced text-only interface.
 
 Use `llm.engine` only when you need lower-level control, such as direct token generation, custom prompt assembly, or explicit tokenizer access.
 

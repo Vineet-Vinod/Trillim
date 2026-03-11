@@ -157,7 +157,7 @@ data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1700000
 data: [DONE]
 ```
 
-With the `search` harness, streamed deltas may include markers such as `[Searching: ...]` and `[Synthesizing...]` before the final answer text.
+Even with the `search` harness enabled, streamed deltas contain assistant text only. Internal search progress is not emitted on this OpenAI-compatible endpoint.
 
 ## `POST /v1/completions`
 
