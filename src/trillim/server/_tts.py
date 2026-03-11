@@ -67,6 +67,119 @@ def wav_header(
     return header
 
 
+def _validate_speed(speed: float) -> float:
+    speed = float(speed)
+    if not (_MIN_SPEED <= speed <= _MAX_SPEED):
+        raise ValueError(f"speed must be between {_MIN_SPEED} and {_MAX_SPEED}")
+    return speed
+
+
+def _iter_pcm_chunks(
+    pcm_bytes: bytes,
+    chunk_size: int = _PCM_STREAM_CHUNK_BYTES,
+):
+    for start in range(0, len(pcm_bytes), chunk_size):
+        yield pcm_bytes[start : start + chunk_size]
+
+
+def _select_frame_size(sample_count: int) -> int:
+    frame_size = 1024
+    while frame_size > sample_count and frame_size > 64:
+        frame_size //= 2
+    return max(32, min(frame_size, sample_count))
+
+
+def _stretch_samples(samples, speed: float):
+    import numpy as np
+
+    if samples.size < 32 or speed == _DEFAULT_SPEED:
+        return samples.copy()
+
+    frame_size = _select_frame_size(int(samples.size))
+    if frame_size <= 1:
+        return samples.copy()
+
+    hop_size = max(1, frame_size // 4)
+    window = np.hanning(frame_size).astype(np.float32)
+    if not np.any(window):
+        window = np.ones(frame_size, dtype=np.float32)
+
+    expected_length = max(1, int(round(samples.size / speed)))
+    frame_count = max(1, int(np.ceil(max(1, samples.size - frame_size) / hop_size)) + 1)
+    if frame_count < 2:
+        if samples.size > expected_length:
+            return samples[:expected_length].copy()
+        if samples.size < expected_length:
+            return np.pad(samples, (0, expected_length - samples.size))
+        return samples.copy()
+
+    stft = np.empty((frame_size // 2 + 1, frame_count), dtype=np.complex64)
+    for frame_index in range(frame_count):
+        start = frame_index * hop_size
+        frame = samples[start : start + frame_size]
+        if frame.size < frame_size:
+            frame = np.pad(frame, (0, frame_size - frame.size))
+        stft[:, frame_index] = np.fft.rfft(frame * window)
+
+    time_steps = np.arange(0, frame_count, speed, dtype=np.float32)
+    stretched_spec = np.empty((stft.shape[0], time_steps.size), dtype=np.complex64)
+    phase_advance = (
+        2.0
+        * np.pi
+        * hop_size
+        * np.arange(stft.shape[0], dtype=np.float32)
+        / frame_size
+    )
+    phase = np.angle(stft[:, 0])
+    first_magnitude = np.abs(stft[:, 0])
+    stretched_spec[:, 0] = first_magnitude * np.exp(1j * phase)
+
+    for out_index, step in enumerate(time_steps[1:], start=1):
+        frame_index = min(int(step), frame_count - 1)
+        next_index = min(frame_index + 1, frame_count - 1)
+        fraction = step - frame_index
+
+        current = stft[:, frame_index]
+        following = stft[:, next_index]
+        magnitude = (1.0 - fraction) * np.abs(current) + fraction * np.abs(following)
+
+        phase_delta = np.angle(following) - np.angle(current) - phase_advance
+        phase_delta -= 2.0 * np.pi * np.round(phase_delta / (2.0 * np.pi))
+        phase += phase_advance + phase_delta
+        stretched_spec[:, out_index] = magnitude * np.exp(1j * phase)
+
+    out_len = frame_size + hop_size * max(0, stretched_spec.shape[1] - 1)
+    stretched = np.zeros(out_len, dtype=np.float32)
+    weights = np.zeros(out_len, dtype=np.float32)
+    for frame_index in range(stretched_spec.shape[1]):
+        start = frame_index * hop_size
+        frame = np.fft.irfft(stretched_spec[:, frame_index], n=frame_size).real
+        stretched[start : start + frame_size] += frame * window
+        weights[start : start + frame_size] += window**2
+
+    nonzero = weights > 1e-6
+    stretched[nonzero] /= weights[nonzero]
+
+    if stretched.size > expected_length:
+        return stretched[:expected_length]
+    if stretched.size < expected_length:
+        return np.pad(stretched, (0, expected_length - stretched.size))
+    return stretched
+
+
+def _stretch_pcm_bytes(pcm_bytes: bytes, speed: float) -> bytes:
+    import numpy as np
+
+    speed = _validate_speed(speed)
+    if speed == _DEFAULT_SPEED or not pcm_bytes:
+        return pcm_bytes
+
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    stretched = _stretch_samples(samples, speed)
+    clipped = np.clip(stretched, -1.0, 1.0)
+    return (clipped * 32767.0).astype(np.int16).tobytes()
+
+
 # ---------------------------------------------------------------------------
 # TTSEngine
 # ---------------------------------------------------------------------------
@@ -107,6 +220,7 @@ class TTSEngine:
         self._lock = asyncio.Lock()
         self.sample_rate: int = 24000
         self.default_voice: str = default_voice
+        self.speed: float = _validate_speed(speed)
 
     async def start(self) -> None:
         """Load the TTS model, default voice state, and discover saved voices."""
@@ -246,8 +360,11 @@ class TTSEngine:
         if self._model is None:
             raise RuntimeError("TTSEngine not started")
 
+        effective_speed = _validate_speed(self.speed if speed is None else speed)
+
         async with self._lock:
             loop = asyncio.get_running_loop()
+            raw_chunks: list[bytes] = []
 
             # Ensure voice state is loaded
             voice_state = await loop.run_in_executor(
@@ -277,7 +394,22 @@ class TTSEngine:
                 arr = chunk_tensor.numpy()
                 pcm = np.clip(arr, -1.0, 1.0)
                 pcm = (pcm * 32767).astype(np.int16)
-                yield pcm.tobytes()
+                raw_chunk = pcm.tobytes()
+                if effective_speed == _DEFAULT_SPEED:
+                    yield raw_chunk
+                    continue
+                raw_chunks.append(raw_chunk)
+
+            if effective_speed != _DEFAULT_SPEED:
+                stretched = await loop.run_in_executor(
+                    None,
+                    _stretch_pcm_bytes,
+                    b"".join(raw_chunks),
+                    effective_speed,
+                )
+                for chunk in _iter_pcm_chunks(stretched):
+                    if chunk:
+                        yield chunk
 
     async def synthesize_full(
         self,
@@ -392,6 +524,7 @@ class TTS(Component):
         self._voices_dir.mkdir(parents=True, exist_ok=True)
         self._engine = None
         self._default_voice = default_voice
+        self._speed = _validate_speed(speed)
 
     async def start(self) -> None:
         self._engine = TTSEngine(
@@ -553,6 +686,10 @@ class TTS(Component):
                 raise HTTPException(status_code=503, detail="TTS engine not started")
             if not req.input.strip():
                 raise HTTPException(status_code=400, detail="input text is empty")
+            try:
+                speed = _validate_speed(req.speed)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
 
             if req.response_format == "pcm":
                 return StreamingResponse(
