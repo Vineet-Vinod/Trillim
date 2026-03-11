@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Trillim. Licensed under the MIT License. See LICENSE.
 """Unit tests for structured chat events and the public LLM chat API."""
 
+import asyncio
 from types import SimpleNamespace
 import unittest
 
@@ -33,6 +34,13 @@ class _ScriptedEngine:
         response = self._responses.pop(0)
         for ch in response:
             yield ord(ch)
+
+
+class _SlowScriptedEngine(_ScriptedEngine):
+    async def generate(self, **kwargs):
+        await asyncio.sleep(0.05)
+        async for token in super().generate(**kwargs):
+            yield token
 
 
 class _SuccessfulSearch:
@@ -133,6 +141,20 @@ class LLMChatApiTests(unittest.IsolatedAsyncioTestCase):
         result = await llm.chat([{"role": "user", "content": "Say hi"}], max_tokens=8)
 
         self.assertEqual(result, "hello")
+
+    async def test_chat_supports_timeout(self):
+        engine = _SlowScriptedEngine(["hello"])
+        llm = LLM("models/fake")
+        llm.state = ServerState.RUNNING
+        llm.engine = engine
+        llm.harness = DefaultHarness(engine)
+
+        with self.assertRaisesRegex(TimeoutError, "LLM chat timed out"):
+            await llm.chat(
+                [{"role": "user", "content": "Say hi"}],
+                max_tokens=8,
+                timeout=0.001,
+            )
 
 
 if __name__ == "__main__":
