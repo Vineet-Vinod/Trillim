@@ -25,12 +25,13 @@ runtime = Runtime(
 runtime.start()
 try:
     messages = [{"role": "user", "content": "Write a one-line haiku about CPUs."}]
-    reply = runtime.llm.chat(messages)
+    reply = runtime.llm.chat(messages, timeout=30)
     print(reply)
 
     for event in runtime.llm.stream_chat(messages):
         if event.type == "token":
             print(event.text, end="", flush=True)
+    text = runtime.whisper.transcribe_wav("recording.wav", timeout=30)
 finally:
     runtime.stop()
 ```
@@ -59,7 +60,7 @@ async def main():
     await llm.start()
     try:
         messages = [{"role": "user", "content": "Write a one-line haiku about CPUs."}]
-        reply = await llm.chat(messages)
+        reply = await llm.chat(messages, timeout=30)
         print(reply)
     finally:
         await llm.stop()
@@ -115,7 +116,7 @@ async def main():
     await whisper.start()
     await tts.start()
     try:
-        text = await whisper.engine.transcribe(Path("recording.wav").read_bytes())
+        text = await whisper.transcribe_wav(Path("recording.wav"), timeout=30)
         audio = await tts.engine.synthesize_full(text, voice="alba")
         Path("speech.wav").write_bytes(audio)
     finally:
@@ -177,7 +178,15 @@ Whisper(
 )
 ```
 
-After `await whisper.start()`, call `await whisper.engine.transcribe(audio_bytes, language=...)`.
+After `await whisper.start()`, prefer the public helpers below. `whisper.engine.transcribe(...)` remains available as an advanced escape hatch.
+
+Preferred public helpers:
+
+```python
+text = await whisper.transcribe_bytes(wav_bytes, language="en", timeout=30)
+text = await whisper.transcribe_wav("recording.wav", timeout=30)
+text = await whisper.transcribe_array(samples, sample_rate=44100, timeout=30)
+```
 
 ## `TTS`
 
