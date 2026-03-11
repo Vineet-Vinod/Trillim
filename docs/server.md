@@ -269,7 +269,7 @@ Convert text to speech. The response is a WAV or PCM audio stream.
 ```bash
 curl http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"input": "Hello, world!", "voice": "alba"}' \
+  -d '{"input": "Hello, world!", "voice": "alba", "speed": 1.5}' \
   --output speech.wav
 ```
 
@@ -279,6 +279,7 @@ Request body:
 |---|---|---|---|
 | `input` | string | required | Text to synthesize |
 | `voice` | string | `"alba"` | Voice ID |
+| `speed` | number | `1.0` | Pitch-preserving playback speed, from `0.25` to `4.0` |
 | `response_format` | string | `"wav"` | `"wav"` or `"pcm"` |
 
 ### `GET /v1/voices`

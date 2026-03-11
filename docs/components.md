@@ -196,6 +196,7 @@ from trillim import TTS
 TTS(
     voices_dir="~/.trillim/voices",
     default_voice="alba",
+    speed=1.0,
 )
 ```
 
@@ -204,15 +205,17 @@ After `await tts.start()`, use the public component methods:
 ```python
 voices = tts.list_voices()
 tts.default_voice = "jean"
+tts.speed = 1.5
 sample_rate = tts.sample_rate
 
 await tts.register_voice("myvoice", wav_bytes)
-pcm_chunks = [chunk async for chunk in tts.synthesize_stream("Hello there")]
-wav_bytes = await tts.synthesize_wav("Hello there", voice="myvoice")
+pcm_chunks = [chunk async for chunk in tts.synthesize_stream("Hello there", speed=1.25)]
+wav_bytes = await tts.synthesize_wav("Hello there", voice="myvoice", speed=1.5)
 await tts.delete_voice("myvoice")
 ```
 
 `tts.engine` remains available as an advanced escape hatch.
+`speed` accepts values from `0.25` to `4.0` and uses pitch-preserving time stretching rather than naive resampling.
 
 ## `SentenceChunker`
 
