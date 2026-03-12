@@ -39,6 +39,42 @@ class _SessionEngine:
             yield chunk
 
 
+class _CleanupBlockingIterator:
+    def __init__(self, cleanup_started: asyncio.Event, release_cleanup: asyncio.Event):
+        self._cleanup_started = cleanup_started
+        self._release_cleanup = release_cleanup
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(1)
+        return _pcm_silence(64, sample=1)
+
+    async def aclose(self):
+        self._cleanup_started.set()
+        await self._release_cleanup.wait()
+
+
+class _StopOrderEngine:
+    def __init__(self, cleanup_started: asyncio.Event, release_cleanup: asyncio.Event):
+        self.sample_rate = 24000
+        self.speed = 1.0
+        self.cleanup_started = cleanup_started
+        self.release_cleanup = release_cleanup
+        self.stop_called = False
+
+    async def stop(self) -> None:
+        self.stop_called = True
+
+    def _synthesize_raw_stream(
+        self,
+        text: str,
+        voice: str | None = None,
+    ):
+        return _CleanupBlockingIterator(self.cleanup_started, self.release_cleanup)
+
+
 class TTSSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.loop = asyncio.get_running_loop()
@@ -242,19 +278,48 @@ class TTSSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_cancels_sessions_and_stops_engine(self):
         never_release = asyncio.Event()
         engine = _SessionEngine(
-            {"slow": [_pcm_silence(256, sample=6)]},
+            {
+                "slow": [_pcm_silence(256, sample=6)],
+                "queued": [_pcm_silence(128, sample=7)],
+            },
             gates={("slow", 0): never_release},
         )
         tts = self._make_tts(engine)
 
         session = tts.speak("slow")
+        queued = tts.speak("queued")
         await tts.stop()
 
         self.assertTrue(session.done)
         self.assertEqual(session.state, "cancelled")
+        self.assertTrue(queued.done)
+        self.assertEqual(queued.state, "cancelled")
         self.assertIsNone(tts.engine)
         self.assertIsNone(tts._loop)
         self.assertTrue(engine.stopped)
+
+    async def test_stop_waits_for_active_session_cleanup_before_engine_stop(self):
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        engine = _StopOrderEngine(cleanup_started, release_cleanup)
+        tts = self._make_tts(engine)
+
+        session = tts.speak("slow")
+        await asyncio.sleep(0)
+
+        stop_task = asyncio.create_task(tts.stop())
+        await cleanup_started.wait()
+        await asyncio.sleep(0.01)
+
+        self.assertFalse(stop_task.done())
+        self.assertFalse(engine.stop_called)
+
+        release_cleanup.set()
+        await stop_task
+
+        self.assertTrue(engine.stop_called)
+        self.assertEqual(session.state, "cancelled")
+        self.assertIsNone(tts.engine)
 
 
 if __name__ == "__main__":

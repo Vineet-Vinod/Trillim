@@ -839,8 +839,14 @@ class TTS(Component):
         sessions.extend(self._queued_sessions)
         self._cancel_all_sessions()
         if sessions:
+            waiters = []
+            for session in sessions:
+                if session._task is not None:
+                    waiters.append(session._task)
+                else:
+                    waiters.append(session._done.wait())
             await asyncio.gather(
-                *(session._done.wait() for session in sessions),
+                *waiters,
                 return_exceptions=True,
             )
         if self._engine is not None:
