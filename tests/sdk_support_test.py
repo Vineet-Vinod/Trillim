@@ -19,9 +19,18 @@ from trillim.server._server import Server
 
 
 class _TestComponent(Component):
-    def __init__(self, name: str, calls: list[str]):
+    def __init__(
+        self,
+        name: str,
+        calls: list[str],
+        *,
+        start_error: Exception | None = None,
+        stop_error: Exception | None = None,
+    ):
         self._name = name
         self._calls = calls
+        self._start_error = start_error
+        self._stop_error = stop_error
         self.started = False
 
     def router(self) -> APIRouter:
@@ -35,14 +44,22 @@ class _TestComponent(Component):
 
     async def start(self) -> None:
         self._calls.append(f"{self._name}.start")
+        if self._start_error is not None:
+            raise self._start_error
         self.started = True
 
     async def stop(self) -> None:
         self._calls.append(f"{self._name}.stop")
         self.started = False
+        if self._stop_error is not None:
+            raise self._stop_error
 
 
 class _OtherTestComponent(_TestComponent):
+    pass
+
+
+class _ThirdTestComponent(_TestComponent):
     pass
 
 
@@ -135,6 +152,63 @@ class SdkSurfaceTests(unittest.TestCase):
 
         self.assertFalse(first.started)
         self.assertFalse(second.started)
+        self.assertEqual(
+            calls,
+            [
+                "alpha.start",
+                "beta.start",
+                "beta.stop",
+                "alpha.stop",
+            ],
+        )
+
+    def test_server_rolls_back_started_components_when_lifespan_start_fails(self):
+        calls: list[str] = []
+        first = _TestComponent("alpha", calls)
+        second = _OtherTestComponent(
+            "beta",
+            calls,
+            stop_error=RuntimeError("beta stop failed"),
+        )
+        third = _ThirdTestComponent(
+            "gamma",
+            calls,
+            start_error=RuntimeError("gamma start failed"),
+        )
+        server = Server(first, second, third)
+
+        with self.assertRaisesRegex(RuntimeError, "gamma start failed"):
+            with TestClient(server.app):
+                pass
+
+        self.assertFalse(first.started)
+        self.assertFalse(second.started)
+        self.assertFalse(third.started)
+        self.assertEqual(
+            calls,
+            [
+                "alpha.start",
+                "beta.start",
+                "gamma.start",
+                "beta.stop",
+                "alpha.stop",
+            ],
+        )
+
+    def test_server_continues_shutdown_after_stop_failure(self):
+        calls: list[str] = []
+        first = _TestComponent("alpha", calls)
+        second = _OtherTestComponent(
+            "beta",
+            calls,
+            stop_error=RuntimeError("beta stop failed"),
+        )
+        server = Server(first, second)
+
+        with self.assertRaisesRegex(RuntimeError, "beta stop failed"):
+            with TestClient(server.app) as client:
+                self.assertEqual(client.get("/alpha").json(), {"name": "alpha"})
+
         self.assertEqual(
             calls,
             [
