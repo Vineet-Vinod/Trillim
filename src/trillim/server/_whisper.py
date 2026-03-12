@@ -154,7 +154,8 @@ class Whisper(Component):
         timeout: float | None = None,
     ) -> str:
         """Read a WAV file from disk and transcribe it."""
-        audio_bytes = Path(path).read_bytes()
+        loop = asyncio.get_running_loop()
+        audio_bytes = await loop.run_in_executor(None, Path(path).read_bytes)
         return await self.transcribe_bytes(
             audio_bytes,
             language=language,
