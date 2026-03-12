@@ -40,6 +40,8 @@ finally:
     runtime.stop()
 ```
 
+If `runtime.llm.chat(..., timeout=...)` expires, Trillim restarts the current inference subprocess before returning the timeout so later requests stay protocol-synchronized. This is a temporary safety measure until cooperative mid-request cancellation exists in the inference engine.
+
 Use `with Runtime(...) as runtime:` when you want automatic teardown.
 
 `Runtime` currently exposes the supported first-party components only: `runtime.llm`, `runtime.whisper`, and `runtime.tts`. User-defined components are not a supported Runtime extension point today, and future built-in components will be documented explicitly when they are added.
@@ -74,6 +76,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+If `llm.chat(..., timeout=...)` expires, Trillim restarts the current inference subprocess before surfacing the timeout. That reset is intentional: the engine cannot yet cancel an in-flight request cleanly, so restarting avoids poisoning the next request.
 
 After `await llm.start()`, use `llm.count_tokens(messages)`, `llm.max_context_tokens`, and `llm.validate_context(messages)` to inspect prompt size safely from app code.
 
