@@ -194,6 +194,8 @@ text = await whisper.transcribe_wav("recording.wav", timeout=30)
 text = await whisper.transcribe_array(samples, sample_rate=44100, timeout=30)
 ```
 
+`transcribe_array()` accepts float or integer array-like input. Integer arrays are normalized from their dtype automatically, including unsigned PCM buffers such as `uint8`.
+
 ## `TTS`
 
 ```python
