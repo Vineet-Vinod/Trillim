@@ -22,6 +22,7 @@ from trillim.server._tts import (
     SentenceChunker,
     TTSEngine,
     TTSSession,
+    _SESSION_MAX_BUFFERED_CHUNKS,
     _SESSION_END,
     _StreamingPCMStretcher,
     wav_header,
@@ -485,6 +486,17 @@ class TTSComponentTests(unittest.IsolatedAsyncioTestCase):
         session._resume_event.wait = wait_then_cancel
         await tts._drain_session(session, iterator)
         self.assertEqual(session._chunks.qsize(), 0)
+
+        session = TTSSession(tts, text="hi", voice=None, speed=1.0, timeout=None)
+        session._chunks = asyncio.Queue(maxsize=2)
+        session._chunk_slots = asyncio.Semaphore(1)
+        await session._put_chunk(b"a")
+        session._finish("completed")
+        self.assertEqual(await session._chunks.get(), b"a")
+        self.assertIs(await session._chunks.get(), _SESSION_END)
+
+        session = TTSSession(tts, text="hi", voice=None, speed=1.0, timeout=None)
+        self.assertEqual(session._chunks.maxsize, _SESSION_MAX_BUFFERED_CHUNKS + 1)
 
     async def test_run_session_error_cancel_and_aclose_paths(self):
         tts = TTS()

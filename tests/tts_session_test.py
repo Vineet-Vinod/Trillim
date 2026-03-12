@@ -160,6 +160,28 @@ class TTSSessionTests(unittest.IsolatedAsyncioTestCase):
         await session.wait()
         self.assertEqual(session.state, "completed")
 
+    async def test_session_backpressures_when_buffer_is_full(self):
+        first_chunk = _pcm_silence(256, sample=31)
+        second_chunk = _pcm_silence(256, sample=32)
+        engine = _SessionEngine({"hello": [first_chunk, second_chunk]})
+        tts = self._make_tts(engine)
+        session = tts.speak("hello")
+        session._chunks = asyncio.Queue(maxsize=2)
+        session._chunk_slots = asyncio.Semaphore(1)
+
+        wait_task = asyncio.create_task(session.wait())
+        await asyncio.sleep(0.01)
+
+        self.assertEqual(session._chunks.qsize(), 1)
+        self.assertFalse(wait_task.done())
+
+        iterator = session.__aiter__()
+        self.assertEqual(await anext(iterator), first_chunk)
+        await asyncio.wait_for(wait_task, timeout=0.5)
+        self.assertEqual(await anext(iterator), second_chunk)
+        with self.assertRaises(StopAsyncIteration):
+            await iterator.__anext__()
+
     async def test_set_speed_changes_future_running_chunks(self):
         release_second = asyncio.Event()
         first_chunk = _pcm_silence(4096)
