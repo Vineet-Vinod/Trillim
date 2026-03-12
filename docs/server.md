@@ -282,6 +282,8 @@ Request body:
 | `speed` | number | `1.0` | Pitch-preserving playback speed, from `0.25` to `4.0` |
 | `response_format` | string | `"wav"` | `"wav"` or `"pcm"` |
 
+`speed` is fixed for the lifetime of a single `/v1/audio/speech` request. Dynamic mid-stream speed changes are only available through the direct Python `TTS` component session API.
+
 ### `GET /v1/voices`
 
 List all available voices, including the built-in set and any saved custom voices.

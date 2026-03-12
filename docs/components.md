@@ -33,6 +33,7 @@ try:
             print(event.text, end="", flush=True)
     text = runtime.whisper.transcribe_wav("recording.wav", timeout=30)
     session = runtime.tts.speak("Hello there", speed=1.25, interrupt=True, timeout=30)
+    session.set_speed(1.5)
     for chunk in session:
         print(len(chunk))
 finally:
@@ -121,6 +122,7 @@ async def main():
     try:
         text = await whisper.transcribe_wav(Path("recording.wav"), timeout=30)
         session = tts.speak(text, voice="alba", speed=1.25, timeout=30)
+        session.set_speed(1.5)
         audio = await session.collect()
         Path("speech.pcm").write_bytes(audio)
     finally:
@@ -216,6 +218,7 @@ await tts.register_voice("myvoice", wav_bytes)
 pcm_chunks = [chunk async for chunk in tts.synthesize_stream("Hello there", speed=1.25)]
 wav_bytes = await tts.synthesize_wav("Hello there", voice="myvoice", speed=1.5)
 session = tts.speak("Queued speech", interrupt=False, timeout=30)
+session.set_speed(1.25)
 session.pause()
 session.resume()
 audio = await session.collect()
@@ -228,6 +231,8 @@ Speed-adjusted synthesis streams progressively with bounded lookahead; it does n
 `tts.speak(...)` returns a `TTSSession` that queues behind the active session by default. Pass `interrupt=True` to cancel the active and queued sessions before starting the new one.
 `TTSSession` yields PCM chunks at `tts.sample_rate`.
 `pause()` and `resume()` control future chunk production only. They do not control speaker-device playback.
+`set_speed()` changes future chunk production only. Already emitted audio is unchanged, and already buffered audio may still arrive at the old speed for a short bounded window.
+For `Runtime`, dynamic speed control is effective when you consume a session progressively. If you call `session.collect()` and wait for the full utterance first, there is no opportunity to adjust speed mid-stream.
 
 ## `SentenceChunker`
 
