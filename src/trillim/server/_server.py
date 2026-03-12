@@ -45,13 +45,35 @@ class Server:
     def _build_app(self) -> FastAPI:
         components = self._components
 
+        async def _stop_components(items: list[Component] | tuple[Component, ...]) -> None:
+            first_error: Exception | None = None
+            for component in reversed(items):
+                try:
+                    await component.stop()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error
+
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            for c in components:
-                await c.start()
-            yield
-            for c in reversed(components):
-                await c.stop()
+            started: list[Component] = []
+            try:
+                for component in components:
+                    await component.start()
+                    started.append(component)
+            except Exception:
+                try:
+                    await _stop_components(started)
+                except Exception:
+                    pass
+                raise
+
+            try:
+                yield
+            finally:
+                await _stop_components(started)
 
         app = FastAPI(title="Trillim API", version="0.1.0", lifespan=lifespan)
 
