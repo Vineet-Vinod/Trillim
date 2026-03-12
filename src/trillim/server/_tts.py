@@ -5,6 +5,7 @@ import asyncio
 import functools
 import re
 import struct
+import threading
 from collections import deque
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -82,6 +83,22 @@ def _iter_pcm_chunks(
 ):
     for start in range(0, len(pcm_bytes), chunk_size):
         yield pcm_bytes[start : start + chunk_size]
+
+
+class _SpeedController:
+    def __init__(self, speed: float):
+        self._lock = threading.Lock()
+        self._speed = _validate_speed(speed)
+
+    def get(self) -> float:
+        with self._lock:
+            return self._speed
+
+    def set(self, speed: float) -> float:
+        validated = _validate_speed(speed)
+        with self._lock:
+            self._speed = validated
+        return validated
 
 
 class _StreamingPCMStretcher:
@@ -278,6 +295,44 @@ class _StreamingPCMStretcher:
         self._output_base += ready_count
         return pcm
 
+
+class _SessionSpeedProcessor:
+    def __init__(self, controller: _SpeedController):
+        self._controller = controller
+        self._speed = controller.get()
+        self._stretcher = None
+        if self._speed != _DEFAULT_SPEED:
+            self._stretcher = _StreamingPCMStretcher(self._speed)
+
+    def push(self, raw_chunk: bytes) -> list[bytes]:
+        outputs: list[bytes] = []
+        target_speed = self._controller.get()
+        if target_speed != self._speed:
+            outputs.extend(self._flush())
+            self._speed = target_speed
+            self._stretcher = None
+            if self._speed != _DEFAULT_SPEED:
+                self._stretcher = _StreamingPCMStretcher(self._speed)
+
+        if self._stretcher is None:
+            if raw_chunk:
+                outputs.append(raw_chunk)
+            return outputs
+
+        stretched = self._stretcher.push(raw_chunk)
+        outputs.extend(chunk for chunk in _iter_pcm_chunks(stretched) if chunk)
+        return outputs
+
+    def finish(self) -> list[bytes]:
+        return self._flush()
+
+    def _flush(self) -> list[bytes]:
+        if self._stretcher is None:
+            return []
+        stretched = self._stretcher.finish()
+        self._stretcher = None
+        return [chunk for chunk in _iter_pcm_chunks(stretched) if chunk]
+
 # ---------------------------------------------------------------------------
 # TTSEngine
 # ---------------------------------------------------------------------------
@@ -455,63 +510,28 @@ class TTSEngine:
         speed: float | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Yield PCM int16 audio chunks for the given text."""
-        if self._model is None:
-            raise RuntimeError("TTSEngine not started")
-
         effective_speed = _validate_speed(self.speed if speed is None else speed)
+        if effective_speed == _DEFAULT_SPEED:
+            async for raw_chunk in self._synthesize_raw_stream(text, voice=voice):
+                yield raw_chunk
+            return
 
-        async with self._lock:
-            loop = asyncio.get_running_loop()
-            stretcher = None
-            if effective_speed != _DEFAULT_SPEED:
-                stretcher = _StreamingPCMStretcher(effective_speed)
-
-            # Ensure voice state is loaded
-            voice_state = await loop.run_in_executor(
+        loop = asyncio.get_running_loop()
+        stretcher = _StreamingPCMStretcher(effective_speed)
+        async for raw_chunk in self._synthesize_raw_stream(text, voice=voice):
+            stretched = await loop.run_in_executor(
                 None,
-                self._get_voice_state,
-                voice,
+                stretcher.push,
+                raw_chunk,
             )
+            for chunk in _iter_pcm_chunks(stretched):
+                if chunk:
+                    yield chunk
 
-            # Create the sync generator
-            gen = self._model.generate_audio_stream(
-                model_state=voice_state,
-                text_to_generate=text,
-                copy_state=True,
-            )
-
-            # Yield chunks by advancing the sync generator in executor
-            while True:
-                chunk_tensor = await loop.run_in_executor(
-                    None,
-                    functools.partial(next, gen, None),
-                )
-                if chunk_tensor is None:
-                    break
-                # Convert float tensor to int16 PCM bytes
-                import numpy as np
-
-                arr = chunk_tensor.numpy()
-                pcm = np.clip(arr, -1.0, 1.0)
-                pcm = (pcm * 32767).astype(np.int16)
-                raw_chunk = pcm.tobytes()
-                if effective_speed == _DEFAULT_SPEED:
-                    yield raw_chunk
-                    continue
-                stretched = await loop.run_in_executor(
-                    None,
-                    stretcher.push,
-                    raw_chunk,
-                )
-                for chunk in _iter_pcm_chunks(stretched):
-                    if chunk:
-                        yield chunk
-
-            if stretcher is not None:
-                stretched = await loop.run_in_executor(None, stretcher.finish)
-                for chunk in _iter_pcm_chunks(stretched):
-                    if chunk:
-                        yield chunk
+        stretched = await loop.run_in_executor(None, stretcher.finish)
+        for chunk in _iter_pcm_chunks(stretched):
+            if chunk:
+                yield chunk
 
     async def synthesize_full(
         self,
@@ -525,6 +545,41 @@ class TTSEngine:
             chunks.append(chunk)
         pcm_data = b"".join(chunks)
         return wav_header(self.sample_rate, data_size=len(pcm_data)) + pcm_data
+
+    async def _synthesize_raw_stream(
+        self,
+        text: str,
+        voice: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        if self._model is None:
+            raise RuntimeError("TTSEngine not started")
+
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            voice_state = await loop.run_in_executor(
+                None,
+                self._get_voice_state,
+                voice,
+            )
+            gen = self._model.generate_audio_stream(
+                model_state=voice_state,
+                text_to_generate=text,
+                copy_state=True,
+            )
+
+            while True:
+                chunk_tensor = await loop.run_in_executor(
+                    None,
+                    functools.partial(next, gen, None),
+                )
+                if chunk_tensor is None:
+                    break
+                import numpy as np
+
+                arr = chunk_tensor.numpy()
+                pcm = np.clip(arr, -1.0, 1.0)
+                pcm = (pcm * 32767).astype(np.int16)
+                yield pcm.tobytes()
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +700,7 @@ class TTSSession:
         self.text = text
         self.voice = voice
         self.speed = speed
+        self._speed_controller = _SpeedController(speed)
         self.timeout = timeout
         self.sample_rate = tts.sample_rate
 
@@ -671,6 +727,10 @@ class TTSSession:
 
     def cancel(self) -> None:
         self._schedule(self._tts._cancel_session, self)
+
+    def set_speed(self, speed: float) -> None:
+        validated = _validate_speed(speed)
+        self._schedule(self._tts._set_session_speed, self, validated)
 
     def _schedule(self, callback, *args) -> None:
         try:
@@ -953,6 +1013,11 @@ class TTS(Component):
             pass
         session._finish("cancelled")
 
+    def _set_session_speed(self, session: TTSSession, speed: float) -> None:
+        if session.done:
+            return
+        session.speed = session._speed_controller.set(speed)
+
     def _cancel_all_sessions(self) -> None:
         if self._active_session is not None:
             active = self._active_session
@@ -976,12 +1041,7 @@ class TTS(Component):
             session._chunks.put_nowait(chunk)
 
     async def _run_session(self, session: TTSSession) -> None:
-        engine = self._require_started()
-        iterator = engine.synthesize_stream(
-            session.text,
-            voice=session.voice,
-            speed=session.speed,
-        ).__aiter__()
+        iterator = self._session_stream(session).__aiter__()
         try:
             if session.timeout is None:
                 await self._drain_session(session, iterator)
@@ -1007,6 +1067,36 @@ class TTS(Component):
             if self._active_session is session:
                 self._active_session = None
             self._start_next_session()
+
+    async def _session_stream(self, session: TTSSession) -> AsyncGenerator[bytes, None]:
+        engine = self._require_started()
+        loop = asyncio.get_running_loop()
+        processor = _SessionSpeedProcessor(session._speed_controller)
+        raw_iterator = engine._synthesize_raw_stream(
+            session.text,
+            voice=session.voice,
+        ).__aiter__()
+
+        try:
+            while True:
+                try:
+                    raw_chunk = await raw_iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                chunks = await loop.run_in_executor(None, processor.push, raw_chunk)
+                for chunk in chunks:
+                    yield chunk
+
+            chunks = await loop.run_in_executor(None, processor.finish)
+            for chunk in chunks:
+                yield chunk
+        finally:
+            aclose = getattr(raw_iterator, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:
+                    pass
 
     def router(self) -> APIRouter:
         docs_path = Path(__file__).resolve().parents[1] / "docs" / "server.md"
