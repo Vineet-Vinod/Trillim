@@ -198,7 +198,7 @@ curl http://localhost:8000/v1/models
 
 ## `POST /v1/models/load`
 
-Swap to a different model, LoRA adapter, or harness configuration at runtime. Models must already exist under `~/.trillim/models/`.
+Swap to a different model, LoRA adapter, or harness configuration at runtime. Models and adapters must already exist under `~/.trillim/models/`.
 
 ```bash
 curl http://localhost:8000/v1/models/load \
@@ -213,7 +213,7 @@ Request body:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `model_dir` | string | required | HuggingFace model ID or path under `~/.trillim/models/` |
-| `adapter_dir` | string | null | LoRA adapter directory |
+| `adapter_dir` | string | null | LoRA adapter ID or path under `~/.trillim/models/` |
 | `harness` | string | null | `default` or `search` |
 | `search_provider` | string | null | `ddgs` or `brave` when `harness` is `search` |
 | `threads` | int | null | `null` keeps the current setting, `0` auto-detects |
