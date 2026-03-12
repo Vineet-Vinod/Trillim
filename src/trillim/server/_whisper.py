@@ -166,11 +166,16 @@ class Whisper(Component):
         samples,
         *,
         sample_rate: int,
+        channel_axis: int | None = None,
         language: str | None = None,
         timeout: float | None = None,
     ) -> str:
         """Encode an array-like audio buffer as WAV and transcribe it."""
-        audio_bytes = _wav_bytes_from_array(samples, sample_rate)
+        audio_bytes = _wav_bytes_from_array(
+            samples,
+            sample_rate,
+            channel_axis=channel_axis,
+        )
         return await self.transcribe_bytes(
             audio_bytes,
             language=language,
@@ -215,12 +220,17 @@ class Whisper(Component):
         return r
 
 
-def _wav_bytes_from_array(samples, sample_rate: int) -> bytes:
+def _wav_bytes_from_array(
+    samples,
+    sample_rate: int,
+    *,
+    channel_axis: int | None = None,
+) -> bytes:
     """Convert an array-like audio buffer to mono 16-bit WAV bytes."""
     if sample_rate < 1:
         raise ValueError("sample_rate must be >= 1")
 
-    mono = _coerce_mono_samples(samples)
+    mono = _coerce_mono_samples(samples, channel_axis=channel_axis)
     pcm = b"".join(struct.pack("<h", _float_to_int16(sample)) for sample in mono)
 
     with io.BytesIO() as buffer:
@@ -232,7 +242,7 @@ def _wav_bytes_from_array(samples, sample_rate: int) -> bytes:
         return buffer.getvalue()
 
 
-def _coerce_mono_samples(samples) -> list[float]:
+def _coerce_mono_samples(samples, *, channel_axis: int | None = None) -> list[float]:
     if isinstance(samples, (bytes, bytearray, memoryview)):
         raise TypeError("samples must be an array-like sequence, not raw bytes")
     if hasattr(samples, "tolist"):
@@ -252,6 +262,7 @@ def _coerce_mono_samples(samples) -> list[float]:
     if _is_sequence(first):
         return _collapse_channels(
             samples,
+            channel_axis=channel_axis,
             scale_hint=scale_hint,
             zero_point=zero_point,
         )
@@ -264,6 +275,7 @@ def _coerce_mono_samples(samples) -> list[float]:
 def _collapse_channels(
     samples,
     *,
+    channel_axis: int | None = None,
     scale_hint: float | None = None,
     zero_point: float = 0.0,
 ) -> list[float]:
@@ -273,13 +285,14 @@ def _collapse_channels(
     row_lengths = {len(row) for row in rows}
     if len(row_lengths) != 1:
         raise ValueError("multichannel samples must have a consistent shape")
+    if channel_axis not in (None, 0, 1):
+        raise ValueError("channel_axis must be None, 0, or 1")
 
     if scale_hint is None:
         scale_hint = _infer_scale_hint(samples)
         zero_point = _infer_zero_point(samples)
 
-    if len(rows) <= 8 and len(rows) < len(rows[0]):
-        # Common channels-first layout: (channels, num_samples)
+    if channel_axis == 0:
         channels = rows
         frame_count = len(rows[0])
         return [
@@ -295,7 +308,7 @@ def _collapse_channels(
             for i in range(frame_count)
         ]
 
-    # Common frames-first layout: (num_samples, channels)
+    # Default 2D layout is frames-first: (num_samples, channels).
     return [
         sum(
             _normalize_scalar(
