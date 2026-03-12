@@ -7,6 +7,10 @@ __pycache__
 dist/
 build/
 *.whl
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Bundled binaries
 src/trillim/_bin/*
