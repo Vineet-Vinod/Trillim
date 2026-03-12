@@ -27,6 +27,7 @@ _DEFAULT_SPEED = 1.0
 _MIN_SPEED = 0.25
 _MAX_SPEED = 4.0
 _PCM_STREAM_CHUNK_BYTES = 4096
+_SESSION_MAX_BUFFERED_CHUNKS = 8
 _SESSION_END = object()
 
 
@@ -710,7 +711,10 @@ class TTSSession:
         self._loop = tts._loop
         self._resume_event = asyncio.Event()
         self._resume_event.set()
-        self._chunks: asyncio.Queue[bytes | object] = asyncio.Queue()
+        self._chunks: asyncio.Queue[bytes | object] = asyncio.Queue(
+            maxsize=_SESSION_MAX_BUFFERED_CHUNKS + 1
+        )
+        self._chunk_slots = asyncio.Semaphore(_SESSION_MAX_BUFFERED_CHUNKS)
         self._done = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._state = "queued"
@@ -774,6 +778,10 @@ class TTSSession:
         self._chunks.put_nowait(_SESSION_END)
         self._done.set()
 
+    async def _put_chunk(self, chunk: bytes) -> None:
+        await self._chunk_slots.acquire()
+        self._chunks.put_nowait(chunk)
+
     def __aiter__(self):
         return self._stream()
 
@@ -782,6 +790,7 @@ class TTSSession:
             item = await self._chunks.get()
             if item is _SESSION_END:
                 break
+            self._chunk_slots.release()
             yield item
         if self._error is not None:
             raise self._error
@@ -1061,7 +1070,7 @@ class TTS(Component):
             await session._resume_event.wait()
             if session.state == "cancelled":
                 return
-            session._chunks.put_nowait(chunk)
+            await session._put_chunk(chunk)
 
     async def _run_session(self, session: TTSSession) -> None:
         iterator = self._session_stream(session).__aiter__()
