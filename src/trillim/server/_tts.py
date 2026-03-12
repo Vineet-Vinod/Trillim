@@ -165,8 +165,6 @@ class _StreamingPCMStretcher:
                 frame = self._input[local_start:]
                 if frame.size < self.frame_size:
                     frame = np.pad(frame, (0, self.frame_size - frame.size))
-                else:
-                    frame = frame[: self.frame_size]
             else:
                 break
 
