@@ -141,6 +141,19 @@ class _SessionEngine:
 
 
 class TTSEngineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_engine_start_skips_missing_voices_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voices_dir = Path(temp_dir) / "voices"
+            model = _FakePocketModel()
+            engine = TTSEngine(voices_dir=voices_dir, default_voice="alba", speed=1.0)
+
+            with patch.object(engine, "_load", return_value=model):
+                await engine.start()
+
+            self.assertFalse(voices_dir.exists())
+            self.assertEqual(engine._custom_voice_files, {})
+            self.assertEqual(engine._voice_states["alba"]["prompt"], "alba")
+
     async def test_wav_header_and_stretcher_edge_paths(self):
         header = wav_header(sample_rate=16000, bits_per_sample=16, channels=2, data_size=100)
         self.assertEqual(header[:4], b"RIFF")
@@ -242,6 +255,14 @@ class TTSEngineTests(unittest.IsolatedAsyncioTestCase):
         engine._model = _FakePocketModel()
         with self.assertRaisesRegex(ValueError, "Invalid voice_id"):
             await engine.register_voice("../bad", b"bytes")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voices_dir = Path(temp_dir) / "voices"
+            engine = TTSEngine(voices_dir=voices_dir)
+            engine._model = _FakePocketModel()
+            await engine.register_voice("lazy", b"bytes")
+            self.assertTrue(voices_dir.exists())
+            self.assertTrue((voices_dir / "lazy.wav").exists())
 
         voices_dir = Path(tempfile.mkdtemp())
         engine = TTSEngine(voices_dir=voices_dir)
@@ -370,6 +391,15 @@ class TTSSessionEdgeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TTSComponentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_constructor_does_not_create_voices_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voices_dir = Path(temp_dir) / "voices"
+
+            tts = TTS(voices_dir=voices_dir)
+
+            self.assertFalse(voices_dir.exists())
+            self.assertEqual(tts._voices_dir, voices_dir)
+
     async def test_component_start_timeout_validation_and_queue_edge_cases(self):
         loop = asyncio.get_running_loop()
         engine = _ManagedComponentEngine(voices_dir=Path(tempfile.mkdtemp()), default_voice="alba", speed=1.0)
