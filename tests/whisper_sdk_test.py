@@ -113,18 +113,26 @@ class WhisperSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "decoded")
         self.assertEqual(engine.calls, [(b"audio", "en")])
 
-    async def test_transcribe_wav_reads_file_bytes(self):
+    async def test_transcribe_wav_reads_file_bytes_off_event_loop(self):
         engine = _FakeWhisperEngine()
         whisper = self._make_whisper(engine)
+        executor_calls: list[tuple[object | None, object]] = []
+
+        class _LoopProbe:
+            async def run_in_executor(self, executor, callback):
+                executor_calls.append((executor, callback))
+                return callback()
 
         with tempfile.NamedTemporaryFile(suffix=".wav") as handle:
             handle.write(b"RIFFdemo")
             handle.flush()
-
-            result = await whisper.transcribe_wav(handle.name, language="fr")
+            with patch("trillim.server._whisper.asyncio.get_running_loop", return_value=_LoopProbe()):
+                result = await whisper.transcribe_wav(handle.name, language="fr")
 
         self.assertEqual(result, "decoded")
         self.assertEqual(engine.calls, [(b"RIFFdemo", "fr")])
+        self.assertEqual(len(executor_calls), 1)
+        self.assertIsNone(executor_calls[0][0])
 
     async def test_transcribe_array_encodes_valid_wav_from_frames_first_audio(self):
         engine = _FakeWhisperEngine()
