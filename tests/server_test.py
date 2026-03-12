@@ -752,7 +752,7 @@ def test_load_model_with_adapter(base_url: str, model_dir: str | None = None,
 
 
 def test_load_model_invalid_adapter(base_url: str, model_dir: str | None = None, **_):
-    """POST /v1/models/load with a nonexistent adapter_dir returns 500."""
+    """POST /v1/models/load rejects adapter_dir values outside the local model store."""
     if model_dir is None:
         return "skip", "no --model-dir provided"
     if not _hot_swap_allowed(model_dir):
@@ -760,8 +760,8 @@ def test_load_model_invalid_adapter(base_url: str, model_dir: str | None = None,
 
     payload = {"model_dir": model_dir, "adapter_dir": "/tmp/nonexistent_adapter_dir_12345"}
     status, body = api(base_url, "POST", "/v1/models/load", payload, timeout=600)
-    if status != 500:
-        return "fail", f"expected 500 for invalid adapter_dir, got {status}: {body}"
+    if status != 403:
+        return "fail", f"expected 403 for invalid adapter_dir outside the model store, got {status}: {body}"
 
 
 def test_swap_adapter_to_no_adapter(base_url: str, model_dir: str | None = None,

@@ -456,10 +456,17 @@ class LLMRouterTests(unittest.TestCase):
             response = client.get("/v1/models")
         self.assertEqual(response.json()["data"][0]["id"], "fake-model")
 
+        model_id = "Trillim/BitNet-TRNQ"
+        adapter_id = "Trillim/BitNet-GenZ-LoRA-TRNQ"
         allowed_root = Path(tempfile.mkdtemp())
-        inside_model = allowed_root / "inside"
+        namespace_root = allowed_root / "Trillim"
+        namespace_root.mkdir()
+        inside_model = namespace_root / "BitNet-TRNQ"
         inside_model.mkdir()
+        inside_adapter = namespace_root / "BitNet-GenZ-LoRA-TRNQ"
+        inside_adapter.mkdir()
         outside_model = Path(tempfile.mkdtemp())
+        outside_adapter = Path(tempfile.mkdtemp())
 
         llm = self._make_running_llm()
         with (
@@ -467,7 +474,7 @@ class LLMRouterTests(unittest.TestCase):
             patch("trillim.model_store.MODELS_DIR", allowed_root),
             TestClient(self._make_app(llm)) as client,
         ):
-            response = client.post("/v1/models/load", json={"model_dir": "missing"})
+            response = client.post("/v1/models/load", json={"model_dir": model_id})
         self.assertEqual(response.status_code, 404)
 
         llm = self._make_running_llm()
@@ -476,8 +483,38 @@ class LLMRouterTests(unittest.TestCase):
             patch("trillim.model_store.MODELS_DIR", allowed_root),
             TestClient(self._make_app(llm)) as client,
         ):
-            response = client.post("/v1/models/load", json={"model_dir": "outside"})
+            response = client.post("/v1/models/load", json={"model_dir": model_id})
         self.assertEqual(response.status_code, 403)
+
+        llm = self._make_running_llm()
+        with (
+            patch(
+                "trillim.model_store.resolve_model_dir",
+                side_effect=[str(inside_model), str(outside_adapter)],
+            ),
+            patch("trillim.model_store.MODELS_DIR", allowed_root),
+            TestClient(self._make_app(llm)) as client,
+        ):
+            response = client.post(
+                "/v1/models/load",
+                json={"model_dir": model_id, "adapter_dir": adapter_id},
+            )
+        self.assertEqual(response.status_code, 403)
+
+        llm = self._make_running_llm()
+        with (
+            patch(
+                "trillim.model_store.resolve_model_dir",
+                side_effect=[str(inside_model), RuntimeError("missing adapter")],
+            ),
+            patch("trillim.model_store.MODELS_DIR", allowed_root),
+            TestClient(self._make_app(llm)) as client,
+        ):
+            response = client.post(
+                "/v1/models/load",
+                json={"model_dir": model_id, "adapter_dir": adapter_id},
+            )
+        self.assertEqual(response.status_code, 404)
 
         llm = self._make_running_llm()
         llm._swap_lock = _AsyncLockStub(locked=True)
@@ -486,7 +523,7 @@ class LLMRouterTests(unittest.TestCase):
             patch("trillim.model_store.MODELS_DIR", allowed_root),
             TestClient(self._make_app(llm)) as client,
         ):
-            response = client.post("/v1/models/load", json={"model_dir": "inside"})
+            response = client.post("/v1/models/load", json={"model_dir": model_id})
         self.assertEqual(response.status_code, 409)
 
         llm = self._make_running_llm()
@@ -503,7 +540,7 @@ class LLMRouterTests(unittest.TestCase):
             patch("trillim.model_store.MODELS_DIR", allowed_root),
             TestClient(self._make_app(llm)) as client,
         ):
-            response = client.post("/v1/models/load", json={"model_dir": "inside"})
+            response = client.post("/v1/models/load", json={"model_dir": model_id})
         self.assertEqual(response.status_code, 500)
         self.assertEqual(llm.state, ServerState.RUNNING)
 
@@ -511,19 +548,22 @@ class LLMRouterTests(unittest.TestCase):
 
         async def swap_success(*args, **kwargs):
             llm.state = ServerState.RUNNING
-            return LoadModelResponse(status="success", model="inside", recompiled=False)
+            return LoadModelResponse(status="success", model="BitNet-TRNQ", recompiled=False)
 
         llm._swap_engine = AsyncMock(side_effect=swap_success)
         with (
-            patch("trillim.model_store.resolve_model_dir", return_value=str(inside_model)),
+            patch(
+                "trillim.model_store.resolve_model_dir",
+                side_effect=[str(inside_model), str(inside_adapter)],
+            ),
             patch("trillim.model_store.MODELS_DIR", allowed_root),
             TestClient(self._make_app(llm)) as client,
         ):
             response = client.post(
                 "/v1/models/load",
                 json={
-                    "model_dir": "inside",
-                    "adapter_dir": "adapter",
+                    "model_dir": model_id,
+                    "adapter_dir": adapter_id,
                     "harness": "search",
                     "search_provider": "ddgs",
                     "threads": 6,
@@ -532,10 +572,10 @@ class LLMRouterTests(unittest.TestCase):
                 },
             )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["model"], "inside")
+        self.assertEqual(response.json()["model"], "BitNet-TRNQ")
         llm._swap_engine.assert_awaited_once_with(
             str(inside_model),
-            adapter_dir="adapter",
+            adapter_dir=str(inside_adapter),
             harness_name="search",
             search_provider="ddgs",
             num_threads=6,
