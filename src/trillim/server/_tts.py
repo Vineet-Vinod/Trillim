@@ -1013,7 +1013,7 @@ class TTS(Component):
         if not docs_path.exists():
             docs_path = Path(__file__).resolve().parents[3] / "docs" / "server.md"
         try:
-            import multipart  # noqa: F401
+            import python_multipart  # noqa: F401
         except ModuleNotFoundError as e:
             raise RuntimeError(
                 "Voice support requires the optional 'voice' extra. "

@@ -460,13 +460,13 @@ class TTSRouterTests(unittest.TestCase):
         app.include_router(tts.router())
         return app
 
-    def test_router_requires_multipart_dependency(self):
+    def test_router_requires_python_multipart_dependency(self):
         tts = TTS()
         real_import = builtins.__import__
 
         def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "multipart":
-                raise ModuleNotFoundError("missing multipart")
+            if name == "python_multipart":
+                raise ModuleNotFoundError("missing python_multipart")
             return real_import(name, globals, locals, fromlist, level)
 
         with (
