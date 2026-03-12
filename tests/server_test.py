@@ -7,7 +7,8 @@ Then run this:           uv run tests/server_test.py [--base-url URL] [--model-d
 
 Voice tests run automatically when the server has --voice enabled;
 otherwise they are skipped.  LoRA tests require --adapter-dir pointing to a
-directory with qmodel.lora (separate from --model-dir).
+directory with qmodel.lora (separate from --model-dir). Standard unittest
+selectors and flags may also be passed alongside the custom server arguments.
 """
 
 import argparse
@@ -15,6 +16,7 @@ import json
 import struct
 import sys
 import threading
+import unittest
 import urllib.error
 import urllib.request
 import uuid
@@ -1216,7 +1218,7 @@ def test_chat_still_works_with_voice(base_url: str, **_):
 # Runner
 # ---------------------------------------------------------------------------
 
-ALL_TESTS = [
+_API_TEST_FUNCTIONS = [
     test_models_endpoint,
     test_chat_non_streaming,
     test_chat_streaming,
@@ -1249,11 +1251,14 @@ ALL_TESTS = [
     test_swap_adapter_to_no_adapter,
 ]
 
-VOICE_TESTS = [
+_VOICE_TEST_FUNCTIONS = [
     test_voices_list,
     test_tts_wav,
     test_tts_pcm,
     test_tts_voice_selection,
+    test_tts_wav_speed,
+    test_tts_pcm_speed,
+    test_tts_invalid_speed,
     test_tts_empty_input,
     test_stt_roundtrip,
     test_stt_text_format,
@@ -1265,7 +1270,69 @@ VOICE_TESTS = [
 ]
 
 
-def main():
+class _ServerTestConfig:
+    def __init__(self) -> None:
+        self.base_url = "http://127.0.0.1:8000"
+        self.model_dir: str | None = None
+        self.adapter_dir: str | None = None
+
+
+_TEST_CONFIG = _ServerTestConfig()
+
+
+class _LegacyServerTestCase(unittest.TestCase):
+    def run_legacy_test(self, test_fn) -> None:
+        result = test_fn(
+            base_url=_TEST_CONFIG.base_url,
+            model_dir=_TEST_CONFIG.model_dir,
+            adapter_dir=_TEST_CONFIG.adapter_dir,
+        )
+        if result is None:
+            return
+        self.assertIsInstance(result, tuple, f"{test_fn.__name__} returned {type(result).__name__}")
+        self.assertEqual(len(result), 2, f"{test_fn.__name__} returned malformed status tuple")
+        status, message = result
+        if status == "skip":
+            self.skipTest(message)
+        if status == "fail":
+            self.fail(message)
+        self.fail(f"{test_fn.__name__} returned unknown status {status!r}: {message}")
+
+
+class ServerApiTests(_LegacyServerTestCase):
+    """Integration tests for chat, completion, cache, and model loading."""
+
+
+class ServerVoiceTests(_LegacyServerTestCase):
+    """Integration tests for TTS, STT, and voice-management routes."""
+
+
+def _install_test_methods(case_cls: type[_LegacyServerTestCase], test_functions) -> None:
+    for test_fn in test_functions:
+        def _method(self, _test_fn=test_fn):
+            self.run_legacy_test(_test_fn)
+
+        _method.__name__ = test_fn.__name__
+        _method.__doc__ = test_fn.__doc__
+        setattr(case_cls, test_fn.__name__, _method)
+
+
+_install_test_methods(ServerApiTests, _API_TEST_FUNCTIONS)
+_install_test_methods(ServerVoiceTests, _VOICE_TEST_FUNCTIONS)
+
+
+def load_tests(loader, tests, pattern):
+    suite = unittest.TestSuite()
+    for case_cls, test_functions in (
+        (ServerApiTests, _API_TEST_FUNCTIONS),
+        (ServerVoiceTests, _VOICE_TEST_FUNCTIONS),
+    ):
+        for test_fn in test_functions:
+            suite.addTest(case_cls(test_fn.__name__))
+    return suite
+
+
+def _parse_args(argv: list[str]) -> list[str]:
     parser = argparse.ArgumentParser(description="Trillim API server tests")
     parser.add_argument(
         "--base-url", default="http://127.0.0.1:8000",
@@ -1279,9 +1346,15 @@ def main():
         "--adapter-dir", default=None,
         help="LoRA adapter directory (separate from model dir) for adapter tests",
     )
-    args = parser.parse_args()
-    base = args.base_url.rstrip("/")
+    args, remaining = parser.parse_known_args(argv[1:])
+    _TEST_CONFIG.base_url = args.base_url.rstrip("/")
+    _TEST_CONFIG.model_dir = args.model_dir
+    _TEST_CONFIG.adapter_dir = args.adapter_dir
+    return [argv[0], *remaining]
 
+
+def _ensure_server_reachable() -> None:
+    base = _TEST_CONFIG.base_url
     # Check server is reachable
     try:
         api(base, "GET", "/v1/models", timeout=5)
@@ -1290,43 +1363,8 @@ def main():
         print("Start the server first:  make serve MODEL_DIR=<path>")
         sys.exit(1)
 
-    all_tests = list(ALL_TESTS) + list(VOICE_TESTS)
-
-    passed = 0
-    failed = 0
-    skipped = 0
-
-    GREEN = "\033[32m"
-    RED = "\033[31m"
-    YELLOW = "\033[33m"
-    RESET = "\033[0m"
-
-    for test_fn in all_tests:
-        name = test_fn.__name__
-        try:
-            result = test_fn(base_url=base, model_dir=args.model_dir, adapter_dir=args.adapter_dir)
-            if isinstance(result, tuple):
-                status, msg = result
-                if status == "fail":
-                    failed += 1
-                    print(f"  {RED}FAIL{RESET}  {name}: {msg}")
-                elif status == "skip":
-                    skipped += 1
-                    print(f"  {YELLOW}SKIP{RESET}  {name}: {msg}")
-            else:
-                passed += 1
-                print(f"  {GREEN}PASS{RESET}  {name}")
-        except Exception as exc:
-            failed += 1
-            print(f"  {RED}FAIL{RESET}  {name}: {exc}")
-
-    print()
-    print(f"Results: {GREEN}{passed} passed{RESET}, "
-          f"{RED}{failed} failed{RESET}, "
-          f"{YELLOW}{skipped} skipped{RESET}")
-
-    sys.exit(1 if failed else 0)
-
 
 if __name__ == "__main__":
-    main()
+    unittest_argv = _parse_args(sys.argv)
+    _ensure_server_reachable()
+    unittest.main(argv=unittest_argv)
