@@ -2,7 +2,7 @@
 """SearchHarness — multi-step harness for models that emit <search> XML tags."""
 
 from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from typing import Any
 
 from trillim.engine import InferenceEngine
 from trillim.events import (
@@ -21,7 +21,6 @@ class SearchHarness(Harness):
     """Harness for models fine-tuned to emit <search>query</search> tags."""
 
     MAX_SEARCH_ITERATIONS = 3
-    DEBUG: ClassVar[bool] = False
 
     def __init__(self, engine: InferenceEngine, search_provider: str = "ddgs"):
         super().__init__(engine)

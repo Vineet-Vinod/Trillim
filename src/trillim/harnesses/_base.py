@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 from trillim.engine import InferenceEngine
 from trillim.events import ChatEvent, ChatTokenEvent
@@ -19,8 +19,6 @@ class Harness(abc.ABC):
 
     Subclasses implement stream_events() for full orchestration.
     """
-
-    DEBUG: ClassVar[bool] = False
 
     def __init__(self, engine: InferenceEngine):
         self.engine = engine

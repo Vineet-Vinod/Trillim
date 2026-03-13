@@ -101,8 +101,6 @@ Typical status markers during search:
 
 The harness allows up to 2 search rounds before the final streamed answer.
 
-To inspect intermediate generations and fetched search context, set `SearchHarness.DEBUG = True` in `src/trillim/harnesses/_search.py`.
-
 ## Sampling and Performance
 
 `trillim chat` uses the model's default sampling parameters. The relevant controls are:
