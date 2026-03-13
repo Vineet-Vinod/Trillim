@@ -2,6 +2,8 @@
 
 Use `trillim chat` when you want a local multi-turn terminal conversation with a model.
 
+If you are embedding Trillim in Python instead of using the CLI, use `llm.session(...)` for multi-turn conversations. `llm.chat(...)` is the one-turn helper.
+
 If you installed with `uv`, prefix each command on this page with `uv run`.
 
 ## Before You Start

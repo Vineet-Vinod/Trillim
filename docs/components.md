@@ -31,6 +31,14 @@ try:
     for event in runtime.llm.stream_chat(messages):
         if event.type == "token":
             print(event.text, end="", flush=True)
+
+    chat = runtime.llm.session([{"role": "system", "content": "Be concise."}])
+    chat.add_user("Write a second haiku about caches.")
+    print(chat.validate())
+    print(chat.chat(timeout=30))
+    chat.add_user("Now make it even shorter.")
+    print(chat.chat(timeout=30))
+
     text = runtime.whisper.transcribe_wav("recording.wav", timeout=30)
     session = runtime.tts.speak("Hello there", speed=1.25, interrupt=True, timeout=30)
     session.set_speed(1.5)
@@ -41,6 +49,8 @@ finally:
 ```
 
 If `runtime.llm.chat(..., timeout=...)` expires, Trillim restarts the current inference subprocess before returning the timeout so later requests stay protocol-synchronized. This is a temporary safety measure until cooperative mid-request cancellation exists in the inference engine.
+
+`runtime.llm.chat(...)` and `runtime.llm.stream_chat(...)` are one-turn helpers. Use `runtime.llm.session(...)` for multi-turn conversations or prompt validation.
 
 Use `with Runtime(...) as runtime:` when you want automatic teardown.
 
@@ -79,24 +89,32 @@ asyncio.run(main())
 
 If `llm.chat(..., timeout=...)` expires, Trillim restarts the current inference subprocess before surfacing the timeout. That reset is intentional: the engine cannot yet cancel an in-flight request cleanly, so restarting avoids poisoning the next request.
 
-After `await llm.start()`, use `llm.count_tokens(messages)`, `llm.max_context_tokens`, and `llm.validate_context(messages)` to inspect prompt size safely from app code.
+`llm.chat(...)` and `llm.stream_chat(...)` are one-turn helpers. For multi-turn conversations, prompt validation, and prompt-budget inspection, create an append-only `ChatSession` with `llm.session(...)`.
 
 ```python
 from trillim import ContextOverflowError
 
-messages = [{"role": "user", "content": "Write a one-line haiku about CPUs."}]
+chat = llm.session([{"role": "system", "content": "Be concise."}])
+chat.add_user("Write a one-line haiku about CPUs.")
 
 try:
-    prompt_tokens = llm.validate_context(messages)
-    print(f"{prompt_tokens=}, {llm.max_context_tokens=}")
+    prompt_tokens = chat.validate()
+    print(f"{prompt_tokens=}, {chat.max_context_tokens=}")
+    print(f"{chat.remaining_context_tokens=}")
+    reply = await chat.chat(timeout=30)
+    print(reply)
+    chat.add_user("Now make it even shorter.")
+    print(await chat.chat(timeout=30))
 except ContextOverflowError as exc:
     print(exc)
 ```
 
-Use `llm.stream_chat(...)` when you want structured progress events:
+`ChatSession` is append-only. Add new turns with `chat.add_user(...)` or `chat.add_system(...)`. Do not edit or remove earlier messages; create a new session when you want to restart from a different history.
+
+Use `llm.stream_chat(...)` when you want structured progress events for a single turn, or `chat.stream_chat(...)` when you want structured events from a multi-turn session:
 
 ```python
-async for event in llm.stream_chat(messages):
+async for event in chat.stream_chat():
     if event.type == "search_started":
         print(f"Searching for: {event.query}")
     elif event.type == "search_result":
@@ -106,8 +124,6 @@ async for event in llm.stream_chat(messages):
     elif event.type == "final_text":
         print(f"\nFinal: {event.text}")
 ```
-
-`llm.harness.run(...)` remains available as an advanced text-only interface.
 
 Use `llm.engine` only when you need lower-level control, such as direct token generation, custom prompt assembly, or explicit tokenizer access.
 
