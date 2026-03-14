@@ -196,6 +196,18 @@ class HarnessEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(events[1].available)
         self.assertIn("Search unavailable", events[1].content)
         self.assertEqual(events[-1].text, "fallback")
+        self.assertEqual(
+            session.messages,
+            (
+                {"role": "user", "content": "Find cats"},
+                {"role": "assistant", "content": "<search>cats</search>"},
+                {
+                    "role": "search",
+                    "content": "Search unavailable, please answer from your knowledge.",
+                },
+                {"role": "assistant", "content": "fallback"},
+            ),
+        )
 
     async def test_harness_run_remains_plain_text_only(self):
         llm = LLM("models/fake", harness_name="search")

@@ -77,9 +77,9 @@ class SearchHarness(Harness):
                 )
                 session._append_message("search", results)
                 break
-
-            session._append_message("search", results)
-            yield ChatSearchResultEvent(query=query, content=results)
+            else:
+                session._append_message("search", results)
+                yield ChatSearchResultEvent(query=query, content=results)
 
         # Final iteration: stream token-by-token
         token_ids, prompt_str = session._prepare_reply()
