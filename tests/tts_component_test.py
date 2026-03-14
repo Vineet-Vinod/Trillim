@@ -226,10 +226,7 @@ class TTSEngineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(engine.default_voice, engine.DEFAULT_VOICE)
 
             chunks = [chunk async for chunk in engine.synthesize_stream("hello", voice="alba", speed=1.0)]
-            wav_bytes = await engine.synthesize_full("hello", voice="alba", speed=1.0)
-
             self.assertTrue(chunks)
-            self.assertTrue(wav_bytes.startswith(b"RIFF"))
 
             await engine.stop()
             self.assertIsNone(engine._model)

@@ -50,15 +50,6 @@ class _FakeTTSEngine:
         yield b"pcm-a"
         yield b"pcm-b"
 
-    async def synthesize_full(
-        self,
-        text: str,
-        voice: str | None = None,
-        speed: float | None = None,
-    ) -> bytes:
-        self.calls.append(("synthesize_full", text, voice, speed))
-        return b"RIFFdemo"
-
 
 class _FakeTensor:
     def __init__(self, samples):
@@ -188,9 +179,13 @@ class TTSSdkTests(unittest.IsolatedAsyncioTestCase):
         wav_bytes = await tts.synthesize_wav("hello", voice="jean", speed=1.5)
 
         self.assertEqual(chunks, [b"pcm-a", b"pcm-b"])
-        self.assertEqual(wav_bytes, b"RIFFdemo")
+        self.assertTrue(wav_bytes.startswith(b"RIFF"))
+        self.assertEqual(wav_bytes[44:], b"pcm-apcm-b")
         self.assertIn(("synthesize_stream", "hello", "jean", 1.5), engine.calls)
-        self.assertIn(("synthesize_full", "hello", "jean", 1.5), engine.calls)
+        self.assertEqual(
+            engine.calls.count(("synthesize_stream", "hello", "jean", 1.5)),
+            2,
+        )
 
     async def test_synthesis_rejects_empty_input(self):
         tts, _ = self._make_tts()
