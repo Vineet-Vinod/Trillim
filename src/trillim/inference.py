@@ -8,6 +8,7 @@ import tempfile
 from prompt_toolkit import prompt as better_input
 from prompt_toolkit.key_binding import KeyBindings
 
+from trillim.errors import ContextOverflowError
 
 def _make_key_bindings():
     """Create key bindings for the chat prompt. Ctrl+G opens $EDITOR."""
@@ -80,44 +81,29 @@ def main():
         if idx + 1 < len(sys.argv):
             search_provider = sys.argv[idx + 1]
 
-    config_path = os.path.join(MODEL_PATH, "config.json")
-
     try:
-        from trillim.model_arch import ModelConfig as ArchConfig
-        from trillim.utils import load_tokenizer, load_default_params
-        from trillim.engine import InferenceEngine
-        from trillim.harnesses import get_harness
+        from trillim.server import LLM
 
-        tokenizer = load_tokenizer(MODEL_PATH, adapter_dir=ADAPTER_DIR, trust_remote_code=TRUST_REMOTE_CODE)
-        arch_config = ArchConfig.from_config_json(config_path, MODEL_PATH, adapter_dir=ADAPTER_DIR)
-        stop_tokens = set(arch_config.eos_tokens)
-        sampling_params = load_default_params(MODEL_PATH)
-
-        engine = InferenceEngine(
+        llm = LLM(
             MODEL_PATH,
-            tokenizer,
-            stop_tokens,
-            sampling_params,
-            arch_config=arch_config,
             adapter_dir=ADAPTER_DIR,
             num_threads=num_threads,
+            trust_remote_code=TRUST_REMOTE_CODE,
             lora_quant=lora_quant,
             unembed_quant=unembed_quant,
+            harness_name=harness_name,
         )
-        harness_cls = get_harness(harness_name)
+        llm._search_provider = search_provider
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(engine.start())
-            if harness_name == "search":
-                harness = harness_cls(engine, search_provider=search_provider)
-            else:
-                harness = harness_cls(engine)
+            loop.run_until_complete(llm.start())
             try:
-                _run_chat_loop(loop, harness, sampling_params)
+                assert llm.engine is not None
+                _run_chat_loop(loop, llm, llm.engine.default_params)
             finally:
-                loop.run_until_complete(engine.stop())
+                loop.run_until_complete(llm.stop())
         finally:
             loop.close()
 
@@ -128,11 +114,22 @@ def main():
         print(f"\nAn error occurred: {e}")
 
 
-def _run_chat_loop(loop, harness, sampling_params):
-    """Interactive chat loop — sync input, async generation via harness."""
-    model_name = os.path.basename(os.path.normpath(harness.engine.model_dir))
-    max_context = harness.arch_config.max_position_embeddings
-    messages = []
+def _run_chat_loop(loop, llm, sampling_params):
+    """Interactive chat loop — sync input, async generation via ChatSession."""
+    model_name = llm.model_name
+    max_context = llm.max_context_tokens
+    chat = llm.session()
+    chat_sampling = {
+        key: sampling_params[key]
+        for key in (
+            "temperature",
+            "top_k",
+            "top_p",
+            "repetition_penalty",
+            "max_tokens",
+        )
+        if key in sampling_params
+    }
 
     kb = _make_key_bindings()
     print(f"Talk to {model_name} (Ctrl+D or 'q' to quit, '/new' for new conversation, Ctrl+G for editor)")
@@ -146,42 +143,47 @@ def _run_chat_loop(loop, harness, sampling_params):
             break
 
         if query.strip() == "/new":
-            messages = []
-            harness.engine.reset_prompt_cache()
+            chat = llm.session()
+            assert llm.engine is not None
+            llm.engine.reset_prompt_cache()
             print("Starting new conversation.")
             continue
 
-        messages.append({"role": "user", "content": query})
-
-        # Context limit check
-        token_ids, _ = harness._prepare_tokens(messages)
-        if len(token_ids) >= max_context:
+        chat.add_user(query)
+        try:
+            chat.validate()
+        except ContextOverflowError:
             print(
                 f"Context window full ({max_context} tokens). Starting new conversation."
             )
-            messages = [messages[-1]]
-            harness.engine.reset_prompt_cache()
+            latest_message = chat.messages[-1]
+            assert llm.engine is not None
+            llm.engine.reset_prompt_cache()
+            chat = llm.session([latest_message])
+            try:
+                chat.validate()
+            except ContextOverflowError:
+                print(
+                    f"Last message exceeds the context window ({max_context} tokens). Shorten it and try again."
+                )
+                chat = llm.session()
+                continue
 
-        loop.run_until_complete(_stream_response(harness, messages, sampling_params))
+        loop.run_until_complete(_stream_response(chat, chat_sampling))
         print()
 
 
-async def _stream_response(harness, messages, sampling_params):
-    """Drain harness output, printing status and text as events arrive."""
-    if hasattr(harness, "stream_events"):
-        async for event in harness.stream_events(messages, **sampling_params):
-            if event.type == "search_started":
-                print(f"[Searching: {event.query}]", flush=True)
-            elif event.type == "search_result" and not event.available:
-                print("[Search unavailable]", flush=True)
-            elif event.type == "search_result":
-                print("[Synthesizing...]", flush=True)
-            elif event.type == "token":
-                print(event.text, end="", flush=True)
-        return
-
-    async for chunk in harness.run(messages, **sampling_params):
-        print(chunk, end="", flush=True)
+async def _stream_response(chat, sampling_params):
+    """Drain chat-session events, printing status and text as they arrive."""
+    async for event in chat.stream_chat(**sampling_params):
+        if event.type == "search_started":
+            print(f"[Searching: {event.query}]", flush=True)
+        elif event.type == "search_result" and not event.available:
+            print("[Search unavailable]", flush=True)
+        elif event.type == "search_result":
+            print("[Synthesizing...]", flush=True)
+        elif event.type == "token":
+            print(event.text, end="", flush=True)
 
 
 if __name__ == "__main__":
