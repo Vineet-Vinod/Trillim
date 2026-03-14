@@ -11,6 +11,8 @@ import tempfile
 
 from transformers import AutoTokenizer
 
+from trillim._sampling import EngineSamplingParams
+
 
 def _load_from_path(model_path: str, trust_remote_code: bool = False):
     """
@@ -232,24 +234,35 @@ def _build_request_block(
     """Build the count-prefixed per-request block.
 
     Always emits ``reset`` and ``tokens``.  Only emits sampling params
-    when explicitly provided (not None).
+    when explicitly provided after validation. ``max_tokens=0`` means
+    unbounded generation and is omitted from the request block.
     """
+    validated = EngineSamplingParams.model_validate(
+        {
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+            "repetition_penalty": repetition_penalty,
+            "rep_penalty_lookback": rep_penalty_lookback,
+            "max_tokens": max_tokens,
+        }
+    )
     pairs: list[str] = [
         f"reset={reset_flag}",
         f"tokens={','.join(str(t) for t in delta_tokens)}",
     ]
-    if temperature is not None:
-        pairs.append(f"temperature={temperature}")
-    if top_k is not None:
-        pairs.append(f"top_k={top_k}")
-    if top_p is not None:
-        pairs.append(f"top_p={top_p}")
-    if repetition_penalty is not None:
-        pairs.append(f"repetition_penalty={repetition_penalty}")
-    if rep_penalty_lookback is not None:
-        pairs.append(f"rep_penalty_lookback={rep_penalty_lookback}")
-    if max_tokens is not None:
-        pairs.append(f"max_tokens={max_tokens}")
+    if validated.temperature is not None:
+        pairs.append(f"temperature={validated.temperature}")
+    if validated.top_k is not None:
+        pairs.append(f"top_k={validated.top_k}")
+    if validated.top_p is not None:
+        pairs.append(f"top_p={validated.top_p}")
+    if validated.repetition_penalty is not None:
+        pairs.append(f"repetition_penalty={validated.repetition_penalty}")
+    if validated.rep_penalty_lookback is not None:
+        pairs.append(f"rep_penalty_lookback={validated.rep_penalty_lookback}")
+    if validated.max_tokens not in (None, 0):
+        pairs.append(f"max_tokens={validated.max_tokens}")
     return f"{len(pairs)}\n" + "".join(f"{p}\n" for p in pairs)
 
 

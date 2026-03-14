@@ -5,7 +5,10 @@ import asyncio
 import os
 from collections.abc import AsyncGenerator
 
+from pydantic import ValidationError
+
 from trillim._prompt_cache import PromptCacheManager, PromptSnapshot
+from trillim._sampling import first_validation_error
 
 _ENGINE_TIMEOUT = 300  # seconds; maximum wait for a single engine I/O operation
 
@@ -169,16 +172,19 @@ class InferenceEngine:
                 # Build count-prefixed key=value request block
                 from trillim.utils import _build_request_block
 
-                req_block = _build_request_block(
-                    list(plan.delta_tokens),
-                    plan.reset_flag,
-                    temperature=temp,
-                    top_k=tk,
-                    top_p=tp,
-                    repetition_penalty=rp,
-                    rep_penalty_lookback=rl,
-                    max_tokens=mt or None,
-                )
+                try:
+                    req_block = _build_request_block(
+                        list(plan.delta_tokens),
+                        plan.reset_flag,
+                        temperature=temp,
+                        top_k=tk,
+                        top_p=tp,
+                        repetition_penalty=rp,
+                        rep_penalty_lookback=rl,
+                        max_tokens=mt,
+                    )
+                except ValidationError as exc:
+                    raise ValueError(first_validation_error(exc)) from exc
                 try:
                     proc.stdin.write(req_block.encode())
                     await asyncio.wait_for(proc.stdin.drain(), timeout=_ENGINE_TIMEOUT)

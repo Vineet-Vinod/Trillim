@@ -3,7 +3,9 @@
 
 import enum
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
+
+from trillim._sampling import HttpSamplingParams
 
 
 # ---------------------------------------------------------------------------
@@ -16,62 +18,15 @@ class ChatMessage(BaseModel):
     content: str
 
 
-class _SamplingValidators:
-    @field_validator("temperature")
-    @classmethod
-    def _check_temperature(cls, v: float | None) -> float | None:
-        if v is not None and v < 0:
-            raise ValueError("temperature must be >= 0")
-        return v
-
-    @field_validator("top_p")
-    @classmethod
-    def _check_top_p(cls, v: float | None) -> float | None:
-        if v is not None and not (0 < v <= 1.0):
-            raise ValueError("top_p must be in (0, 1]")
-        return v
-
-    @field_validator("top_k")
-    @classmethod
-    def _check_top_k(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("top_k must be >= 1")
-        return v
-
-    @field_validator("max_tokens")
-    @classmethod
-    def _check_max_tokens(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("max_tokens must be >= 1")
-        return v
-
-    @field_validator("repetition_penalty")
-    @classmethod
-    def _check_repetition_penalty(cls, v: float | None) -> float | None:
-        if v is not None and v < 0:
-            raise ValueError("repetition_penalty must be >= 0")
-        return v
-
-
-class ChatCompletionRequest(_SamplingValidators, BaseModel):
+class ChatCompletionRequest(HttpSamplingParams):
     model: str = ""
     messages: list[ChatMessage]
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    max_tokens: int | None = None
-    repetition_penalty: float | None = None
     stream: bool = False
 
 
-class CompletionRequest(_SamplingValidators, BaseModel):
+class CompletionRequest(HttpSamplingParams):
     model: str = ""
     prompt: str
-    temperature: float | None = None
-    top_p: float | None = None
-    top_k: int | None = None
-    max_tokens: int | None = None
-    repetition_penalty: float | None = None
     stream: bool = False
 
 
