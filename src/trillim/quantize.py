@@ -266,6 +266,10 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
             is_lm_head = "lm_head" in key
             should_quantize = not (is_1d or is_embedding or is_lm_head)
 
+            # Only promote axes that correspond to model dimensions that expand
+            # from *_orig to aligned runtime dims. Arbitrary axes stay raw in
+            # the manifest, and LoRA shapes are kept raw for DarkNet to pad
+            # later when it writes qmodel.lora.
             # Padding detection
             padded_row = row
             padded_col = col
@@ -494,6 +498,8 @@ def _build_lora_entries(adapter_dir, config, shard_path_list, shard_idx_map,
                 a_offsets = a_info["data_offsets"]
                 b_offsets = b_info["data_offsets"]
 
+                # Preserve raw adapter matrix shapes in the manifest. DarkNet
+                # pads A/B to the runtime in/out dims while keeping rank as-is.
                 layer_targets.append({
                     "a_dtype": a_dtype_code,
                     "a_rows": a_info["shape"][0],
@@ -752,9 +758,17 @@ def _validate_adapter_dims(adapter_dir, config):
 
     Reads the adapter safetensors header (no weight data) and verifies that
     representative LoRA matrix shapes match the model's hidden/intermediate
-    dimensions and layer count.  Raises ``SystemExit`` on mismatch so the
+    dimensions, rank axes, and layer count. Raises ``ValueError`` on mismatch so the
     user gets a clear error before any heavy quantization work starts.
     """
+    adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
+    if not os.path.exists(adapter_config_path):
+        return  # Missing file is caught later by _build_lora_entries
+
+    with open(adapter_config_path, encoding="utf-8") as f:
+        adapter_config = json.load(f)
+    expected_rank = adapter_config["r"]
+
     st_path = os.path.join(adapter_dir, "adapter_model.safetensors")
     if not os.path.exists(st_path):
         return  # Missing file is caught later by _build_lora_entries
@@ -786,6 +800,19 @@ def _validate_adapter_dims(adapter_dir, config):
             f"base model only has {config.num_layers} layers. "
             "This adapter was not trained on this model."
         )
+
+    for name in tensor_names:
+        shape = header[name]["shape"]
+        if name.endswith(".lora_A.weight") and shape[0] != expected_rank:
+            raise ValueError(
+                f"Adapter tensor {name} has rank {shape[0]} on lora_A but "
+                f"adapter_config.json declares r={expected_rank}."
+            )
+        if name.endswith(".lora_B.weight") and shape[1] != expected_rank:
+            raise ValueError(
+                f"Adapter tensor {name} has rank {shape[1]} on lora_B but "
+                f"adapter_config.json declares r={expected_rank}."
+            )
 
     # --- Check hidden dimension via q_proj lora_A (shape [rank, hidden_size]) ---
     expected_hidden = config.hidden_dim_orig or config.hidden_dim
