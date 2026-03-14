@@ -11,6 +11,3 @@ def make_id() -> str:
 
 def now() -> int:
     return int(time.time())
-
-
-from trillim.utils import load_default_params  # re-export

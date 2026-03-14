@@ -10,9 +10,11 @@ from collections.abc import AsyncGenerator
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+from trillim.utils import load_default_params
+
 from ._component import Component
 
-from ._helpers import load_default_params, make_id, now
+from ._helpers import make_id, now
 from ._models import (
     ChatChoice,
     ChatCompletionRequest,
