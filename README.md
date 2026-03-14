@@ -153,6 +153,8 @@ For custom voice registration through `POST /v1/voices`, accept the terms for [k
 hf auth login
 ```
 
+Custom voice uploads through `POST /v1/voices` are limited to 8 MB per file.
+
 That setup is only required once. Predefined voices work without it.
 
 ## Performance Highlights

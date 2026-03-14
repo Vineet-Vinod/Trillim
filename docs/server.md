@@ -297,7 +297,7 @@ Built-in voices: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `epon
 
 ### `POST /v1/voices`
 
-Upload an audio sample to register a custom voice. The sample is saved to the configured voices directory and persists across server restarts. The directory is created lazily on first successful registration.
+Upload an audio sample to register a custom voice. The sample is saved to the configured voices directory and persists across server restarts. The directory is created lazily on first successful registration. Uploads are limited to 8 MB per file.
 
 ```bash
 curl http://localhost:8000/v1/voices \
