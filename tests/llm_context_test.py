@@ -56,6 +56,27 @@ class _RewritingTokenizer(_TrackingTokenizer):
         return rendered
 
 
+class _PatternMergingTokenizer(_TrackingTokenizer):
+    def __init__(self, patterns: list[str]):
+        super().__init__()
+        self._patterns = sorted(enumerate(patterns), key=lambda item: len(item[1]), reverse=True)
+
+    def encode(self, text: str, add_special_tokens: bool = True):
+        self.encode_calls.append((text, add_special_tokens))
+        token_ids: list[int] = []
+        index = 0
+        while index < len(text):
+            for pattern_index, pattern in self._patterns:
+                if text.startswith(pattern, index):
+                    token_ids.append(1000 + pattern_index)
+                    index += len(pattern)
+                    break
+            else:
+                token_ids.append(ord(text[index]))
+                index += 1
+        return token_ids
+
+
 class _ScriptedEngine:
     def __init__(self, responses: list[str], tokenizer, *, max_context_tokens: int = 128):
         self._responses = list(responses)
@@ -130,17 +151,22 @@ class ChatSessionMetricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tokenizer.encode_calls, encode_calls_after_first_prepare)
         self.assertEqual(session.messages[-1], {"role": "user", "content": "hello"})
 
-    async def test_session_reuses_generated_tokens_and_only_encodes_new_suffixes(self):
-        llm, tokenizer = _make_llm(responses=["ok", "again"])
-        session = llm.session([{"role": "user", "content": "hello"}])
+    async def test_session_reuses_generated_tokens_without_full_prompt_reencode(self):
+        llm, tokenizer = _make_llm(responses=["ok", "again"], max_context_tokens=2048)
+        user_text = "h" * 700
+        session = llm.session([{"role": "user", "content": user_text}])
+        assistant_prompt = f"<user>{user_text}</user><assistant>"
 
-        self.assertEqual(session.prompt_tokens, len(tokenizer.encode_calls[0][0]) + len("<assistant>"))
+        self.assertEqual(session.prompt_tokens, len(assistant_prompt))
         self.assertEqual(await session.chat(), "ok")
-        self.assertEqual(tokenizer.encode_calls[-1], ("</assistant>", False))
+        self.assertNotIn(
+            assistant_prompt,
+            [text for text, _ in tokenizer.encode_calls[1:]],
+        )
         self.assertEqual(
             session.messages,
             (
-                {"role": "user", "content": "hello"},
+                {"role": "user", "content": user_text},
                 {"role": "assistant", "content": "ok"},
             ),
         )
@@ -148,15 +174,44 @@ class ChatSessionMetricTests(unittest.IsolatedAsyncioTestCase):
         encode_count_after_reply = len(tokenizer.encode_calls)
         session.add_user("next")
         next_prompt_tokens = session.prompt_tokens
+        next_prompt = f"{assistant_prompt}ok</assistant><user>next</user><assistant>"
+        new_call_texts = [text for text, _ in tokenizer.encode_calls[encode_count_after_reply:]]
 
         self.assertGreater(next_prompt_tokens, 0)
+        self.assertIn("<user>next</user>", new_call_texts)
+        self.assertIn("<assistant>", new_call_texts)
+        self.assertNotIn(
+            next_prompt,
+            new_call_texts,
+        )
+
+    async def test_session_checks_multiple_overlap_windows_before_staying_on_fast_path(self):
+        user_text = "h" * 700
+        llm, tokenizer = _make_llm(max_context_tokens=2048)
+        session = llm.session([{"role": "user", "content": user_text}])
+        encode_count_after_init = len(tokenizer.encode_calls)
+
+        self.assertEqual(session.prompt_tokens, len(f"<user>{user_text}</user><assistant>"))
         self.assertEqual(
-            tokenizer.encode_calls[encode_count_after_reply:],
+            [text for text, _ in tokenizer.encode_calls[encode_count_after_init:]],
             [
-                ("<user>next</user>", False),
-                ("<assistant>", False),
+                "<assistant>",
+                session._base_prompt_str[-8:],
+                session._base_prompt_str[-8:] + "<assistant>",
+                session._base_prompt_str[-16:],
+                session._base_prompt_str[-16:] + "<assistant>",
+                session._base_prompt_str[-32:],
+                session._base_prompt_str[-32:] + "<assistant>",
             ],
         )
+
+    async def test_session_short_circuits_empty_suffix_overlap_checks(self):
+        llm, _ = _make_llm()
+        session = llm.session([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(session._encode_suffix(""), [])
+        self.assertTrue(session._suffix_passes_overlap_validation("", "tail", [1, 2, 3]))
+        self.assertTrue(session._suffix_passes_overlap_validation("base", "", []))
 
     async def test_session_prompt_edits_do_not_mutate_backend_cache_before_generation(self):
         llm, _ = _make_llm(responses=["ok", "again"])
@@ -215,6 +270,36 @@ class ChatSessionMetricTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "append-only prompt rendering"):
             session.add_system("rules")
+
+    async def test_session_full_reencodes_when_checked_overlap_window_detects_boundary_merge(self):
+        merge_pattern = ("x" * 20) + "</user><assistant>"
+        user_text = ("p" * 120) + ("x" * 20)
+        tokenizer = _PatternMergingTokenizer([merge_pattern])
+        llm, _ = _make_llm(tokenizer=tokenizer, max_context_tokens=2048)
+        session = llm.session([{"role": "user", "content": user_text}])
+        encode_count_after_init = len(tokenizer.encode_calls)
+        assistant_prompt = f"<user>{user_text}</user><assistant>"
+        prompt_tokens = session.prompt_tokens
+
+        self.assertIn(
+            assistant_prompt,
+            [text for text, _ in tokenizer.encode_calls[encode_count_after_init:]],
+        )
+        self.assertLess(prompt_tokens, len(assistant_prompt))
+
+    async def test_session_finalization_full_reencodes_when_tail_boundary_is_not_safe(self):
+        assistant_text = ("p" * 120) + ("x" * 20)
+        tokenizer = _PatternMergingTokenizer([("x" * 20) + "</assistant>"])
+        llm, _ = _make_llm(tokenizer=tokenizer, responses=[assistant_text])
+        session = llm.session([{"role": "user", "content": "hello"}])
+        final_prompt = f"<user>hello</user><assistant>{assistant_text}</assistant>"
+
+        self.assertEqual(await session.chat(), assistant_text)
+        self.assertIn(final_prompt, [text for text, _ in tokenizer.encode_calls])
+        self.assertEqual(
+            session._base_token_ids,
+            tokenizer.encode(final_prompt, add_special_tokens=False),
+        )
 
 
 class ChatSessionLifecycleTests(unittest.TestCase):

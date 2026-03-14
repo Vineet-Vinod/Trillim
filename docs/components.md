@@ -113,6 +113,8 @@ except ContextOverflowError as exc:
 
 `ChatSession` is append-only. Add new turns with `chat.add_user(...)` or `chat.add_system(...)`. Do not edit or remove earlier messages; create a new session when you want to restart from a different history.
 
+`ChatSession` also requires append-only prompt rendering from the active chat template. If finalizing a turn or appending a later message would rewrite earlier rendered prompt text, Trillim raises an error instead of mutating prior prompt state. Incremental tokenization stays on the fast path only when a small overlap check near the append boundary agrees with suffix-only encoding. Tokenizers that merge across longer boundaries still work, but they fall back to full prompt re-encoding more often and will be slower in multi-turn sessions.
+
 Use `llm.stream_chat(...)` when you want structured progress events for a single turn, or `chat.stream_chat(...)` when you want structured events from a multi-turn session:
 
 ```python
