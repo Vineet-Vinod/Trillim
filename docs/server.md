@@ -237,7 +237,7 @@ These routes are only available when the server starts with `--voice`.
 
 ### `POST /v1/audio/transcriptions`
 
-Speech-to-text using Whisper. Upload an audio file as multipart form data. The maximum file size is 8 MB.
+Speech-to-text using Whisper. Upload an audio file as multipart form data. The maximum file size is 10 MB.
 
 ```bash
 curl http://localhost:8000/v1/audio/transcriptions \
@@ -249,7 +249,7 @@ Form fields:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `file` | file | required | Audio file to transcribe |
+| `file` | file | required | Audio file to transcribe, max 10 MB |
 | `model` | string | `"whisper-1"` | Model identifier for client compatibility |
 | `language` | string | null | Optional language hint such as `"en"` |
 | `response_format` | string | `"json"` | `"json"` or `"text"` |
