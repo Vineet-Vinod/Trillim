@@ -16,6 +16,8 @@ from trillim._timeouts import run_with_timeout
 from ._component import Component
 from ._models import TranscriptionResponse
 
+_MAX_TRANSCRIPTION_UPLOAD_BYTES = 10 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # WhisperEngine
@@ -74,13 +76,28 @@ class WhisperEngine:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 None,
-                functools.partial(self._transcribe_sync, audio_bytes, language),
+                functools.partial(self._transcribe_sync, io.BytesIO(audio_bytes), language),
             )
 
-    def _transcribe_sync(self, audio_bytes: bytes, language: str | None) -> str:
-        audio_file = io.BytesIO(audio_bytes)
+    async def transcribe_path(
+        self,
+        path: str | Path,
+        language: str | None = None,
+    ) -> str:
+        """Transcribe an audio file directly from disk."""
+        if self._model is None:
+            raise RuntimeError("WhisperEngine not started")
+
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                functools.partial(self._transcribe_sync, str(path), language),
+            )
+
+    def _transcribe_sync(self, audio_input, language: str | None) -> str:
         segments, _ = self._model.transcribe(
-            audio_file,
+            audio_input,
             language=language,
             beam_size=5,
         )
@@ -153,13 +170,12 @@ class Whisper(Component):
         language: str | None = None,
         timeout: float | None = None,
     ) -> str:
-        """Read a WAV file from disk and transcribe it."""
-        loop = asyncio.get_running_loop()
-        audio_bytes = await loop.run_in_executor(None, Path(path).read_bytes)
-        return await self.transcribe_bytes(
-            audio_bytes,
-            language=language,
-            timeout=timeout,
+        """Transcribe a WAV file directly from disk."""
+        engine = self._require_started()
+        return await run_with_timeout(
+            engine.transcribe_path(path, language=language),
+            timeout,
+            "Whisper transcription",
         )
 
     async def transcribe_array(
@@ -210,9 +226,9 @@ class Whisper(Component):
                 raise HTTPException(
                     status_code=503, detail="Whisper engine not started"
                 )
-            audio_bytes = await file.read(8 * 1024 * 1024 + 1)
-            if len(audio_bytes) > 8 * 1024 * 1024:
-                raise HTTPException(status_code=413, detail="Upload exceeds 8 MB limit")
+            audio_bytes = await file.read(_MAX_TRANSCRIPTION_UPLOAD_BYTES + 1)
+            if len(audio_bytes) > _MAX_TRANSCRIPTION_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Upload exceeds 10 MB limit")
             text = await whisper.transcribe_bytes(audio_bytes, language=language)
             if response_format == "text":
                 return StreamingResponse(iter([text]), media_type="text/plain")
