@@ -552,19 +552,6 @@ class TTSEngine:
             if chunk:
                 yield chunk
 
-    async def synthesize_full(
-        self,
-        text: str,
-        voice: str | None = None,
-        speed: float | None = None,
-    ) -> bytes:
-        """Synthesize text and return a complete WAV file as bytes."""
-        chunks = []
-        async for chunk in self.synthesize_stream(text, voice, speed):
-            chunks.append(chunk)
-        pcm_data = b"".join(chunks)
-        return wav_header(self.sample_rate, data_size=len(pcm_data)) + pcm_data
-
     async def _synthesize_raw_stream(
         self,
         text: str,
@@ -957,11 +944,16 @@ class TTS(Component):
         speed: float | None = None,
     ) -> bytes:
         self._validate_input_text(text)
-        return await self._require_started().synthesize_full(
+        engine = self._require_started()
+        chunks = []
+        async for chunk in engine.synthesize_stream(
             text,
             voice=voice,
             speed=speed,
-        )
+        ):
+            chunks.append(chunk)
+        pcm_data = b"".join(chunks)
+        return wav_header(engine.sample_rate, data_size=len(pcm_data)) + pcm_data
 
     def speak(
         self,
