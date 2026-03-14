@@ -47,19 +47,19 @@ class _SyncAsyncIterator(Iterator):
             pass
 
 
-class _RuntimeComponentProxy:
-    """Expose a component through synchronous wrappers."""
+class _RuntimeManagedProxy:
+    """Expose a runtime-managed target through synchronous wrappers."""
 
-    def __init__(self, runtime: Runtime, component: Component):
+    def __init__(self, runtime: Runtime, managed):
         self._runtime = runtime
-        self._component = component
+        self._managed = managed
 
     def __getattr__(self, name: str):
-        attr = self._runtime._get_component_attr(self._component, name)
+        attr = self._runtime._get_managed_attr(self._managed, name)
         if callable(attr):
             def _call(*args, **kwargs):
-                result = self._runtime._invoke_component_attr(
-                    self._component, name, args, kwargs
+                result = self._runtime._invoke_managed_attr(
+                    self._managed, name, args, kwargs
                 )
                 return self._runtime._syncify_result(result)
 
@@ -67,32 +67,25 @@ class _RuntimeComponentProxy:
         return self._runtime._syncify_result(attr)
 
 
-class _RuntimeObjectProxy:
-    """Expose runtime-managed objects, such as TTS sessions, synchronously."""
+class _RuntimeComponentProxy(_RuntimeManagedProxy):
+    """Expose a runtime-owned component as the synchronous service entry point."""
 
-    def __init__(self, runtime: Runtime, obj):
-        self._runtime = runtime
-        self._obj = obj
 
-    def __getattr__(self, name: str):
-        attr = self._runtime._get_object_attr(self._obj, name)
-        if callable(attr):
-            def _call(*args, **kwargs):
-                result = self._runtime._invoke_object_attr(
-                    self._obj, name, args, kwargs
-                )
-                return self._runtime._syncify_result(result)
-
-            return _call
-        return self._runtime._syncify_result(attr)
+class _RuntimeObjectProxy(_RuntimeManagedProxy):
+    """Expose returned runtime-managed handles, such as sessions, synchronously."""
 
     def __iter__(self):
-        if not hasattr(self._obj, "__aiter__"):
-            raise TypeError(f"{type(self._obj).__name__!r} is not iterable")
+        if not hasattr(self._managed, "__aiter__"):
+            raise TypeError(f"{type(self._managed).__name__!r} is not iterable")
         try:
-            iterator = self._runtime._invoke_object_attr(self._obj, "__aiter__", (), {})
+            iterator = self._runtime._invoke_managed_attr(
+                self._managed,
+                "__aiter__",
+                (),
+                {},
+            )
         except AttributeError as exc:
-            raise TypeError(f"{type(self._obj).__name__!r} is not iterable") from exc
+            raise TypeError(f"{type(self._managed).__name__!r} is not iterable") from exc
         return _SyncAsyncIterator(self._runtime, iterator)
 
 
@@ -267,12 +260,6 @@ class Runtime:
             self._get_attr_async(obj, name), loop
         ).result()
 
-    def _get_component_attr(self, component: Component, name: str):
-        return self._get_managed_attr(component, name)
-
-    def _get_object_attr(self, obj, name: str):
-        return self._get_managed_attr(obj, name)
-
     async def _invoke_attr_async(
         self,
         obj,
@@ -290,20 +277,7 @@ class Runtime:
             return await result
         return result
 
-    def _invoke_component_attr(
-        self,
-        component: Component,
-        name: str,
-        args: tuple,
-        kwargs: dict,
-    ):
-        if not self._started:
-            raise RuntimeError("Runtime not started")
-        return self._submit_to_loop(
-            self._invoke_attr_async(component, name, args, kwargs)
-        ).result()
-
-    def _invoke_object_attr(
+    def _invoke_managed_attr(
         self,
         obj,
         name: str,
@@ -321,6 +295,9 @@ class Runtime:
             result = self._submit_coroutine(result).result()
         if hasattr(result, "__anext__"):
             return _SyncAsyncIterator(self, result)
+        # Results marked as runtime-managed handles stay distinct from
+        # top-level components so object proxies can layer extra behavior such
+        # as sync iteration for async-iterable sessions.
         if getattr(result, "_runtime_proxy", False):
             return _RuntimeObjectProxy(self, result)
         return result
