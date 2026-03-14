@@ -50,6 +50,23 @@ class _ScriptedEngine:
         self.arch_config = SimpleNamespace(max_position_embeddings=max_context_tokens)
         self._cached_prompt_str = ""
         self._last_cache_hit = 3
+        self.finalized_prompt_snapshots = []
+
+    @property
+    def cached_prompt_str(self) -> str:
+        return self._cached_prompt_str
+
+    @property
+    def last_cache_hit(self) -> int:
+        return self._last_cache_hit
+
+    def finalize_prompt_cache(self, snapshot) -> None:
+        self.finalized_prompt_snapshots.append(snapshot)
+        self._cached_prompt_str = snapshot.prompt_str or ""
+
+    def reset_prompt_cache(self) -> None:
+        self._cached_prompt_str = ""
+        self._last_cache_hit = 0
 
     async def generate(self, **_):
         response = self._responses.pop(0)
@@ -142,7 +159,7 @@ class HarnessEventTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "assistant", "content": "hi"},
             ),
         )
-        self.assertEqual(llm.engine._cached_prompt_str, "user: hello\nassistant: hi")
+        self.assertEqual(llm.engine.cached_prompt_str, "user: hello\nassistant: hi")
 
     async def test_default_harness_renders_empty_generation_prompt(self):
         llm = LLM("models/fake")

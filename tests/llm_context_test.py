@@ -63,6 +63,23 @@ class _ScriptedEngine:
         self.arch_config = SimpleNamespace(max_position_embeddings=max_context_tokens)
         self._cached_prompt_str = ""
         self._last_cache_hit = 0
+        self.finalized_prompt_snapshots = []
+
+    @property
+    def cached_prompt_str(self) -> str:
+        return self._cached_prompt_str
+
+    @property
+    def last_cache_hit(self) -> int:
+        return self._last_cache_hit
+
+    def finalize_prompt_cache(self, snapshot) -> None:
+        self.finalized_prompt_snapshots.append(snapshot)
+        self._cached_prompt_str = snapshot.prompt_str or ""
+
+    def reset_prompt_cache(self) -> None:
+        self._cached_prompt_str = ""
+        self._last_cache_hit = 0
 
     async def generate(self, **_):
         response = self._responses.pop(0)
@@ -134,6 +151,19 @@ class ChatSessionMetricTests(unittest.IsolatedAsyncioTestCase):
                 ("<assistant>", False),
             ],
         )
+
+    async def test_session_prompt_edits_do_not_mutate_backend_cache_before_generation(self):
+        llm, _ = _make_llm(responses=["ok", "again"])
+        llm.engine._cached_prompt_str = "previous-cache"
+        session = llm.session([{"role": "user", "content": "hello"}])
+
+        self.assertEqual(llm.engine.cached_prompt_str, "previous-cache")
+
+        await session.chat()
+        self.assertEqual(llm.engine.cached_prompt_str, "<user>hello</user><assistant>ok")
+
+        session.add_user("again")
+        self.assertEqual(llm.engine.cached_prompt_str, "<user>hello</user><assistant>ok")
 
     async def test_session_validate_raises_typed_overflow_error(self):
         llm, _ = _make_llm(max_context_tokens=8)

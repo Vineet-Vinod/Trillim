@@ -77,6 +77,21 @@ class _ManagedEngine:
         self.generate_calls: list[dict] = []
         self.init = {}
 
+    @property
+    def cached_prompt_str(self) -> str:
+        return self._cached_prompt_str
+
+    @property
+    def last_cache_hit(self) -> int:
+        return self._last_cache_hit
+
+    def finalize_prompt_cache(self, snapshot) -> None:
+        self._cached_prompt_str = snapshot.prompt_str or ""
+
+    def reset_prompt_cache(self) -> None:
+        self._cached_prompt_str = ""
+        self._last_cache_hit = 0
+
     async def start(self):
         self.start_calls += 1
         if self.start_error is not None:
