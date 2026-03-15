@@ -77,14 +77,35 @@ class _PatternMergingTokenizer(_TrackingTokenizer):
         return token_ids
 
 
+class _EotTemplateTokenizer(_TrackingTokenizer):
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize: bool = False,
+        add_generation_prompt: bool = False,
+    ):
+        rendered = "".join(
+            f"<{message['role']}>{message['content']}<|eot_id|>"
+            for message in messages
+        )
+        if add_generation_prompt:
+            rendered += "<assistant>"
+        return rendered
+
+
 class _ScriptedEngine:
     def __init__(self, responses: list[str], tokenizer, *, max_context_tokens: int = 128):
         self._responses = list(responses)
         self.tokenizer = tokenizer
         self.arch_config = SimpleNamespace(max_position_embeddings=max_context_tokens)
+        self._cached_token_ids: list[int] = []
         self._cached_prompt_str = ""
         self._last_cache_hit = 0
         self.finalized_prompt_snapshots = []
+
+    @property
+    def cached_token_ids(self) -> list[int]:
+        return list(self._cached_token_ids)
 
     @property
     def cached_prompt_str(self) -> str:
@@ -221,10 +242,10 @@ class ChatSessionMetricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.engine.cached_prompt_str, "previous-cache")
 
         await session.chat()
-        self.assertEqual(llm.engine.cached_prompt_str, "<user>hello</user><assistant>ok")
+        self.assertEqual(llm.engine.cached_prompt_str, "<user>hello</user><assistant>ok</assistant>")
 
         session.add_user("again")
-        self.assertEqual(llm.engine.cached_prompt_str, "<user>hello</user><assistant>ok")
+        self.assertEqual(llm.engine.cached_prompt_str, "<user>hello</user><assistant>ok</assistant>")
 
     async def test_session_validate_raises_typed_overflow_error(self):
         llm, _ = _make_llm(max_context_tokens=8)
@@ -299,6 +320,40 @@ class ChatSessionMetricTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             session._base_token_ids,
             tokenizer.encode(final_prompt, add_special_tokens=False),
+        )
+
+    async def test_session_finalization_snapshots_full_rendered_prompt_for_eot_templates(self):
+        tokenizer = _EotTemplateTokenizer()
+        llm, _ = _make_llm(tokenizer=tokenizer, responses=["ok"])
+        session = llm.session([{"role": "user", "content": "hello"}])
+        final_prompt = "<user>hello<|eot_id|><assistant>ok<|eot_id|>"
+
+        self.assertEqual(await session.chat(), "ok")
+        self.assertEqual(session._base_prompt_str, final_prompt)
+        self.assertEqual(session._base_token_ids, tokenizer.encode(final_prompt, add_special_tokens=False))
+        self.assertEqual(len(llm.engine.finalized_prompt_snapshots), 1)
+        self.assertEqual(llm.engine.finalized_prompt_snapshots[0].prompt_str, final_prompt)
+        self.assertEqual(
+            llm.engine.finalized_prompt_snapshots[0].token_ids,
+            tuple(tokenizer.encode(final_prompt, add_special_tokens=False)),
+        )
+
+    async def test_session_finalization_preserves_truncated_cached_prefix_for_eot_templates(self):
+        tokenizer = _EotTemplateTokenizer()
+        llm, _ = _make_llm(tokenizer=tokenizer, responses=["ok"])
+        session = llm.session([{"role": "user", "content": "hello"}])
+        prepared_token_ids, prepared_prompt = session._prepare_reply()
+        llm.engine._cached_token_ids = prepared_token_ids + tokenizer.encode("ok", add_special_tokens=False)
+
+        self.assertEqual(await session.chat(), "ok")
+        self.assertEqual(len(llm.engine.finalized_prompt_snapshots), 1)
+        self.assertEqual(
+            llm.engine.finalized_prompt_snapshots[0].prompt_str,
+            f"{prepared_prompt}ok",
+        )
+        self.assertEqual(
+            llm.engine.finalized_prompt_snapshots[0].token_ids,
+            tuple(prepared_token_ids + tokenizer.encode("ok", add_special_tokens=False)),
         )
 
 
