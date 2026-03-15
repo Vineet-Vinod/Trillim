@@ -51,6 +51,14 @@ class SamplingSchemaTests(unittest.TestCase):
 
         self.assertEqual(first_validation_error(_EmptyErrors()), "fallback message")
 
+    def test_first_validation_error_preserves_non_prefixed_message(self):
+        class _CustomErrors:
+            def errors(self, include_url=False):
+                del include_url
+                return [{"msg": "already clean"}]
+
+        self.assertEqual(first_validation_error(_CustomErrors()), "already clean")
+
 
 if __name__ == "__main__":
     unittest.main()
