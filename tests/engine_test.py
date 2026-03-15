@@ -91,6 +91,11 @@ class _FakeProcess:
         return self.returncode
 
 
+class _KillOSErrorProcess(_FakeProcess):
+    def kill(self) -> None:
+        raise OSError("kill failed")
+
+
 def _module(name: str, **attrs) -> ModuleType:
     module = ModuleType(name)
     for key, value in attrs.items():
@@ -271,6 +276,16 @@ class InferenceEngineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(proc.killed)
         self.assertEqual(proc.wait_calls, 1)
+
+    def test_finalize_prompt_cache_delegates_to_prompt_cache_manager(self):
+        engine = self._make_engine()
+        snapshot = PromptSnapshot.create([1, 2, 3], "abc")
+        self._seed_cache(engine, [1, 2, 3])
+
+        engine.finalize_prompt_cache(snapshot)
+
+        self.assertEqual(engine.cached_token_ids, [1, 2, 3])
+        self.assertEqual(engine.cached_prompt_str, "abc")
 
     async def test_generate_requires_running_process(self):
         engine = self._make_engine()
@@ -594,6 +609,18 @@ class InferenceEngineTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict(sys.modules, {"trillim.utils": utils_module}):
             with self.assertRaisesRegex(RuntimeError, "Inference engine crashed: missing kv"):
+                await self._collect(engine, token_ids=[1])
+
+    async def test_generate_swallows_oserror_when_cleanup_kill_fails(self):
+        engine = self._make_engine()
+        engine.process = _KillOSErrorProcess(stdout_lines=[b""], stderr_data=b"crashed")
+        utils_module = _module(
+            "trillim.utils",
+            _build_request_block=lambda *args, **kwargs: "request",
+        )
+
+        with patch.dict(sys.modules, {"trillim.utils": utils_module}):
+            with self.assertRaisesRegex(RuntimeError, "Inference engine crashed: crashed"):
                 await self._collect(engine, token_ids=[1])
 
 
