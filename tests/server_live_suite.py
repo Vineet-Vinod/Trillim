@@ -6,7 +6,7 @@ These tests require an already-running server plus real model assets. Run them w
 
     MODEL_DIR=<path> \
     ADAPTER_DIR=<path-optional> \
-    uv run python -m unittest tests.server_live_test
+    uv run python -m unittest tests.server_live_suite
 
 Optional env vars:
     TRILLIM_LIVE_SERVER_BASE_URL=http://127.0.0.1:8000

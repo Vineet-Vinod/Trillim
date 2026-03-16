@@ -4,10 +4,40 @@ MODEL_DIR ?= Trillim/BitNet-TRNQ
 ADAPTER_DIR ?= Trillim/BitNet-GenZ-LoRA-TRNQ
 TEST_PATTERN ?= *_test.py
 
-ci: test
+ci: test test-live
 
 test:
 	MODEL_DIR="$(MODEL_DIR)" ADAPTER_DIR="$(ADAPTER_DIR)" uv run python -m unittest discover -s tests -p "$(TEST_PATTERN)"
+
+test-live:
+	@set -euo pipefail; \
+	server_log=$$(mktemp); \
+	uv run trillim serve "$(MODEL_DIR)" --voice >"$$server_log" 2>&1 & \
+	server_pid=$$!; \
+	cleanup() { \
+		kill "$$server_pid" 2>/dev/null || true; \
+		wait "$$server_pid" 2>/dev/null || true; \
+		rm -f "$$server_log"; \
+	}; \
+	trap cleanup EXIT; \
+	ready=0; \
+	for _ in $$(seq 1 120); do \
+		if uv run python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/v1/models", timeout=2).close()' >/dev/null 2>&1; then \
+			ready=1; \
+			break; \
+		fi; \
+		if ! kill -0 "$$server_pid" 2>/dev/null; then \
+			cat "$$server_log"; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done; \
+	if [ "$$ready" -ne 1 ]; then \
+		echo "Timed out waiting for live test server at http://127.0.0.1:8000" >&2; \
+		cat "$$server_log"; \
+		exit 1; \
+	fi; \
+	MODEL_DIR="$(MODEL_DIR)" ADAPTER_DIR="$(ADAPTER_DIR)" uv run python -m unittest tests.server_live_suite
 
 coverage:
 	MODEL_DIR="$(MODEL_DIR)" ADAPTER_DIR="$(ADAPTER_DIR)" uv run --with coverage python -m coverage run --source=src/trillim -m unittest discover -s tests -p "$(TEST_PATTERN)"
@@ -23,4 +53,4 @@ coverage-xml:
 	uv run --with coverage python -m coverage xml
 	uv run --with coverage python -m coverage report -m
 
-.PHONY: ci test coverage coverage-html coverage-xml
+.PHONY: ci test test-live coverage coverage-html coverage-xml
