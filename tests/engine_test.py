@@ -407,15 +407,28 @@ class InferenceEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.cached_token_ids, [])
         self.assertEqual(engine.last_cache_hit, 0)
 
-    async def test_generate_normalizes_sampling_validation_errors(self):
+    async def test_generate_normalizes_sampling_validation_errors_without_killing_process(self):
         engine = self._make_engine()
-        proc = _FakeProcess()
+        proc = _FakeProcess(stdout_lines=[b"65\n", b"0\n", b"2\n"])
         engine.process = proc
 
         with self.assertRaisesRegex(ValueError, "temperature must be >= 0"):
             await self._collect(engine, token_ids=[1], temperature=-0.1)
 
         self.assertEqual(proc.stdin.writes, [])
+        self.assertFalse(proc.killed)
+        self.assertIsNone(proc.returncode)
+
+        utils_module = _module(
+            "trillim.utils",
+            _build_request_block=lambda *args, **kwargs: "request",
+        )
+
+        with patch.dict(sys.modules, {"trillim.utils": utils_module}):
+            tokens = await self._collect(engine, token_ids=[1])
+
+        self.assertEqual(tokens, [65])
+        self.assertEqual(proc.stdin.writes, [b"request"])
 
     async def test_generate_raises_on_unexpected_stdout_eof(self):
         engine = self._make_engine()

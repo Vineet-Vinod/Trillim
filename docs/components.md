@@ -89,6 +89,8 @@ asyncio.run(main())
 
 For `llm.chat(..., timeout=...)` and `chat.chat(timeout=...)`, `timeout` is an inactivity timeout between emitted chat events, not a cap on total wall-clock response time. If the chat stalls for longer than `timeout`, Trillim restarts the current inference subprocess before surfacing the timeout. That reset is intentional: the engine cannot yet cancel an in-flight request cleanly, so restarting avoids poisoning the next request.
 
+Sampling arguments are validated before a request is sent to the inference subprocess. Invalid values raise `ValueError` immediately and do not reset the running engine.
+
 `llm.chat(...)` and `llm.stream_chat(...)` are one-turn helpers. For multi-turn conversations, prompt validation, and prompt-budget inspection, create a `ChatSession` with `llm.session(...)`.
 
 `ChatSession` is a public SDK type and can be imported with `from trillim import ChatSession`, but prefer creating sessions through `llm.session(...)` rather than calling the constructor directly. Underscored methods on `ChatSession` are internal implementation details.
