@@ -787,6 +787,7 @@ class LLM(Component):
 
         self._harness_name = next_harness
         self._search_provider = next_search_provider
+        self._model_dir = model_dir
         self._adapter_dir = resolved_adapter
         self._num_threads = threads
         self._lora_quant = lora_quant

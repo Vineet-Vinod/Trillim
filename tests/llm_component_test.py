@@ -435,6 +435,7 @@ class LLMSwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(result.model, "model")
         self.assertEqual(llm.model_name, "model")
+        self.assertEqual(llm._model_dir, str(model_dir))
         self.assertEqual(llm.state, ServerState.RUNNING)
         self.assertIs(llm.engine, engine_factory.instances[0])
         self.assertIsInstance(llm.harness, SearchHarness)
@@ -446,6 +447,63 @@ class LLMSwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm._unembed_quant, "q8")
         self.assertEqual(engine_factory.instances[0].init["adapter_dir"], str(adapter_dir))
         self.assertEqual(engine_factory.instances[0].init["num_threads"], 8)
+
+    async def test_restart_after_timeout_uses_swapped_model_metadata(self):
+        llm = self._make_running_llm()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = self._write_model_dir(root, "replacement-model")
+            adapter_dir = root / "adapter"
+            adapter_dir.mkdir()
+            (adapter_dir / "trillim_config.json").write_text("{}", encoding="utf-8")
+            (adapter_dir / "qmodel.lora").write_bytes(b"lora")
+
+            arch_config = SimpleNamespace(
+                eos_tokens=[7],
+                max_position_embeddings=48,
+            )
+            engine_factory = _EngineFactory()
+
+            with (
+                patch("trillim.model_store.resolve_model_dir", return_value=str(adapter_dir)),
+                patch("trillim.model_store.validate_adapter_model_compat", return_value=None),
+                patch("trillim.utils.load_tokenizer", return_value=_FakeTokenizer()),
+                patch("trillim.model_arch.ModelConfig.from_config_json", return_value=arch_config),
+                patch("trillim.server._llm.load_default_params", return_value={"temperature": 0.5}),
+                patch("trillim.server._llm.InferenceEngine", engine_factory),
+            ):
+                result = await llm._swap_engine(
+                    str(model_dir),
+                    adapter_dir="adapter-ref",
+                    harness_name="search",
+                    search_provider="brave",
+                    num_threads=8,
+                    lora_quant="q4",
+                    unembed_quant="q8",
+                )
+
+        self.assertEqual(result.status, "success")
+
+        restart_result = LoadModelResponse(
+            status="success",
+            model="replacement-model",
+            recompiled=False,
+            message="",
+        )
+        llm._swap_engine = AsyncMock(return_value=restart_result)
+
+        await llm._restart_after_timeout("LLM chat")
+
+        llm._swap_engine.assert_awaited_once_with(
+            str(model_dir),
+            adapter_dir=str(adapter_dir),
+            harness_name="search",
+            search_provider="brave",
+            num_threads=8,
+            lora_quant="q4",
+            unembed_quant="q8",
+        )
 
 
 class LLMRouterTests(unittest.TestCase):

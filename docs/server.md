@@ -201,6 +201,7 @@ curl http://localhost:8000/v1/models
 ## `POST /v1/models/load`
 
 Swap to a different model, LoRA adapter, or harness configuration at runtime. Models and adapters must already exist under `~/.trillim/models/`.
+Later timeout-triggered engine recovery reuses the most recently loaded model, adapter, and harness settings from this endpoint.
 
 ```bash
 curl http://localhost:8000/v1/models/load \
