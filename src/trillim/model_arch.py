@@ -2,7 +2,7 @@
 """
 Architecture registry and model configuration.
 
-Defines supported architectures (BitNet, Llama, Qwen2, Mistral) and provides
+Defines supported architectures (BitNet, Llama, Qwen3.5) and provides
 ModelConfig for extracting model dimensions from config.json.
 """
 
@@ -15,11 +15,12 @@ from typing import Optional
 
 
 class ArchType(IntEnum):
-    """Architecture enumeration - matches C++ ArchType enum."""
+    """Python architecture enumeration."""
 
     UNKNOWN = 0
     BITNET = 1
     LLAMA = 2
+    QWEN35 = 3
 
 
 class ActivationType(IntEnum):
@@ -81,6 +82,23 @@ ARCH_REGISTRY: dict[str, ArchInfo] = {
             "mlp.down_proj",
         ],
     ),
+    "qwen3_5forconditionalgeneration": ArchInfo(
+        arch_type=ArchType.QWEN35,
+        activation=ActivationType.SILU,
+        has_attn_sub_norm=False,
+        has_ffn_sub_norm=False,
+        component_order=[
+            "input_layernorm",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.q_proj",
+            "self_attn.o_proj",
+            "post_attention_layernorm",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ],
+    ),
 }
 
 _VARIANT_ALIASES = {
@@ -118,7 +136,21 @@ _STOP_TOKEN_NAMES = (
 _DEFAULT_EOS_TOKENS = {
     ArchType.BITNET: 128009,
     ArchType.LLAMA: 128009,
+    ArchType.QWEN35: 248044,
 }
+
+
+def _extract_model_text_config(config: dict) -> dict:
+    """Return the text config for text-only or multimodal checkpoints."""
+    text_config = config.get("text_config")
+    if isinstance(text_config, dict) and text_config:
+        normalized = dict(text_config)
+        normalized["architectures"] = config.get(
+            "architectures",
+            text_config.get("architectures", []),
+        )
+        return normalized
+    return config
 
 
 def _get_all_tensor_names(model_dir):
@@ -381,7 +413,8 @@ class ModelConfig:
         adapter_dir: Optional[str] = None,
     ) -> "ModelConfig":
         """Parse config.json and extract model configuration."""
-        config = _load_json_file(config_path)
+        raw_config = _load_json_file(config_path)
+        config = _extract_model_text_config(raw_config)
         arch_info = _resolve_arch_info(config)
         tensor_names = _load_tensor_names_if_available(model_dir)
         arch_info = _resolve_bitnet_arch_info(arch_info, tensor_names)

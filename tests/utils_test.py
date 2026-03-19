@@ -358,6 +358,52 @@ class UtilsTests(unittest.TestCase):
         self.assertEqual(len(first_hash), 64)
         self.assertRegex(first_hash, r"^[0-9a-f]{64}$")
 
+    def test_compute_base_model_hash_uses_nested_text_config_for_qwen35(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir)
+            (model_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "architectures": ["Qwen3_5ForConditionalGeneration"],
+                        "model_type": "qwen3_5",
+                        "hidden_size": 1,
+                        "text_config": {
+                            "hidden_size": 2560,
+                            "intermediate_size": 9216,
+                            "num_hidden_layers": 32,
+                            "num_attention_heads": 16,
+                            "num_key_value_heads": 4,
+                            "vocab_size": 248320,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            first_hash = utils.compute_base_model_hash(temp_dir)
+            (model_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "architectures": ["Qwen3_5ForConditionalGeneration"],
+                        "model_type": "qwen3_5",
+                        "hidden_size": 9999,
+                        "text_config": {
+                            "hidden_size": 2560,
+                            "intermediate_size": 9216,
+                            "num_hidden_layers": 32,
+                            "num_attention_heads": 16,
+                            "num_key_value_heads": 4,
+                            "vocab_size": 248320,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            second_hash = utils.compute_base_model_hash(temp_dir)
+
+        self.assertEqual(first_hash, second_hash)
+        self.assertEqual(len(first_hash), 64)
+
 
 if __name__ == "__main__":
     unittest.main()

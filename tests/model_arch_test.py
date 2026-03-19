@@ -197,6 +197,50 @@ class ModelArchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unknown activation function 'gelu'"):
                 ModelConfig.from_config_json(str(config_path))
 
+    def test_from_config_json_supports_qwen35_text_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = self._write_config(
+                Path(temp_dir),
+                {
+                    "architectures": ["Qwen3_5ForConditionalGeneration"],
+                    "model_type": "qwen3_5",
+                    "text_config": {
+                        "hidden_size": 2560,
+                        "intermediate_size": 9216,
+                        "num_hidden_layers": 32,
+                        "num_attention_heads": 16,
+                        "num_key_value_heads": 4,
+                        "head_dim": 256,
+                        "vocab_size": 248320,
+                        "max_position_embeddings": 262144,
+                        "rms_norm_eps": 1e-6,
+                        "rope_theta": 10000000.0,
+                        "hidden_act": "silu",
+                        "eos_token_id": 248044,
+                        "tie_word_embeddings": True,
+                        "attention_bias": False,
+                    },
+                },
+            )
+
+            config = ModelConfig.from_config_json(str(config_path))
+
+        self.assertEqual(config.arch_type, ArchType.QWEN35)
+        self.assertEqual(config.arch_info.activation, ActivationType.SILU)
+        self.assertEqual(config.hidden_dim, 2560)
+        self.assertEqual(config.intermediate_dim, 9216)
+        self.assertEqual(config.num_layers, 32)
+        self.assertEqual(config.num_heads, 16)
+        self.assertEqual(config.num_kv_heads, 4)
+        self.assertEqual(config.vocab_size, 248320)
+        self.assertEqual(config.head_dim, 256)
+        self.assertEqual(config.max_position_embeddings, 262144)
+        self.assertEqual(config.norm_eps, 1e-6)
+        self.assertEqual(config.rope_theta, 10000000.0)
+        self.assertTrue(config.tie_word_embeddings)
+        self.assertFalse(config.has_qkv_bias)
+        self.assertEqual(config.eos_tokens, [248044])
+
     def test_from_config_json_collects_and_dedupes_eos_tokens_from_model_and_adapter(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

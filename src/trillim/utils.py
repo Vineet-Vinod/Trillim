@@ -269,6 +269,8 @@ def compute_base_model_hash(model_dir):
 
     Returns a hex SHA-256 digest string, or "" if config.json cannot be read.
     """
+    from trillim.model_arch import _extract_model_text_config
+
     config_path = os.path.join(model_dir, "config.json")
     if not os.path.exists(config_path):
         return ""
@@ -277,17 +279,18 @@ def compute_base_model_hash(model_dir):
             raw = json.load(f)
     except (json.JSONDecodeError, OSError):
         return ""
+    config = _extract_model_text_config(raw)
 
     # Extract the fields that uniquely identify a model architecture.
     # Sorted keys + json.dumps(sort_keys=True) keeps the hash deterministic.
     identity = {
-        "architectures": raw.get("architectures", []),
-        "hidden_size": raw.get("hidden_size"),
-        "intermediate_size": raw.get("intermediate_size"),
-        "num_hidden_layers": raw.get("num_hidden_layers"),
-        "num_attention_heads": raw.get("num_attention_heads"),
-        "num_key_value_heads": raw.get("num_key_value_heads"),
-        "vocab_size": raw.get("vocab_size"),
+        "architectures": config.get("architectures", []),
+        "hidden_size": config.get("hidden_size"),
+        "intermediate_size": config.get("intermediate_size"),
+        "num_hidden_layers": config.get("num_hidden_layers"),
+        "num_attention_heads": config.get("num_attention_heads"),
+        "num_key_value_heads": config.get("num_key_value_heads"),
+        "vocab_size": config.get("vocab_size"),
     }
     blob = json.dumps(identity, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()
