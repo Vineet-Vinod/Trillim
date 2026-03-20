@@ -3,8 +3,33 @@ SHELL := /bin/bash
 MODEL_DIR ?= Trillim/BitNet-TRNQ
 ADAPTER_DIR ?= Trillim/BitNet-GenZ-LoRA-TRNQ
 TEST_PATTERN ?= *_test.py
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+ifeq ($(UNAME_S),Linux)
+ifeq ($(UNAME_M),x86_64)
+LOCAL_PLATFORM := linux-x86_64
+else ifneq (,$(filter $(UNAME_M),arm64 aarch64))
+LOCAL_PLATFORM := linux-arm64
+endif
+else ifeq ($(UNAME_S),Darwin)
+ifeq ($(UNAME_M),x86_64)
+LOCAL_PLATFORM := macos-x86_64
+else ifneq (,$(filter $(UNAME_M),arm64 aarch64))
+LOCAL_PLATFORM := macos-arm64
+endif
+endif
 
 ci: test test-live
+
+test test-live coverage coverage-html coverage-xml: bundle
+
+bundle:
+ifeq ($(LOCAL_PLATFORM),)
+	@echo "Unsupported local platform: $(UNAME_S) $(UNAME_M)" >&2; exit 1
+else
+	uv run python -c "from scripts import build_wheels; build_wheels.clean_bin_dir(); build_wheels.copy_binaries('$(LOCAL_PLATFORM)')"
+endif
 
 test:
 	MODEL_DIR="$(MODEL_DIR)" ADAPTER_DIR="$(ADAPTER_DIR)" uv run python -m unittest discover -s tests -p "$(TEST_PATTERN)"
@@ -53,4 +78,4 @@ coverage-xml:
 	uv run --with coverage python -m coverage xml
 	uv run --with coverage python -m coverage report -m
 
-.PHONY: ci test test-live coverage coverage-html coverage-xml
+.PHONY: ci bundle test test-live coverage coverage-html coverage-xml
