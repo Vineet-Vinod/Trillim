@@ -16,6 +16,7 @@ Usage:
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -126,6 +127,59 @@ def get_processing_order(tensors_meta, arch_info):
     return sorted(tensors_meta, key=sort_key)
 
 
+def get_visual_processing_order(tensors_meta):
+    """Sort Qwen visual tensors into a stable block-major order."""
+    component_order = [
+        "patch_embed.proj.weight",
+        "patch_embed.proj.bias",
+        "pos_embed.weight",
+        "norm1.weight",
+        "norm1.bias",
+        "attn.qkv.weight",
+        "attn.qkv.bias",
+        "attn.proj.weight",
+        "attn.proj.bias",
+        "norm2.weight",
+        "norm2.bias",
+        "mlp.linear_fc1.weight",
+        "mlp.linear_fc1.bias",
+        "mlp.linear_fc2.weight",
+        "mlp.linear_fc2.bias",
+        "merger.norm.weight",
+        "merger.norm.bias",
+        "merger.linear_fc1.weight",
+        "merger.linear_fc1.bias",
+        "merger.linear_fc2.weight",
+        "merger.linear_fc2.bias",
+    ]
+
+    def get_intra_priority(key):
+        for idx, suffix in enumerate(component_order):
+            if key.endswith(suffix):
+                return idx
+        return len(component_order)
+
+    def sort_key(item):
+        key = item["key"]
+
+        if key.startswith("model.visual.patch_embed."):
+            return (0, -1, get_intra_priority(key), key.endswith(".bias"), key)
+        if key == "model.visual.pos_embed.weight":
+            return (1, -1, get_intra_priority(key), 0, key)
+
+        block_match = re.search(r"\.blocks\.(\d+)\.", key)
+        if block_match:
+            block_idx = int(block_match.group(1))
+            return (2, block_idx, get_intra_priority(key), key.endswith(".bias"), key)
+
+        if key.startswith("model.visual.merger."):
+            return (3, -1, get_intra_priority(key), key.endswith(".bias"), key)
+
+        return (4, -1, get_intra_priority(key), key.endswith(".bias"), key)
+
+    return sorted(tensors_meta, key=sort_key)
+
+
 # ---------------------------------------------------------------------------
 # Manifest constants
 # ---------------------------------------------------------------------------
@@ -189,15 +243,13 @@ def _validate_supported_model_tensors(model_dir: str, config: ModelConfig) -> No
 
     if config.arch_type.name == "QWEN35":
         unsupported_groups = []
-        if any(name.startswith("model.visual.") for name in tensor_names):
-            unsupported_groups.append("model.visual.*")
         if any(name.startswith("mtp.") for name in tensor_names):
             unsupported_groups.append("mtp.*")
 
         if unsupported_groups:
             groups = ", ".join(unsupported_groups)
             raise ValueError(
-                "Qwen3.5 multimodal checkpoints are not supported for quantization yet. "
+                "Qwen3.5 MTP tensors are not supported for quantization yet. "
                 f"Found unsupported tensor groups: {groups}"
             )
 
@@ -256,6 +308,7 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
 
     # Build tensor entries (skip if no base model safetensors)
     tensor_entries = []
+    sections = []
     if has_model_tensors:
         # Get all tensor metadata
         if is_sharded:
@@ -281,7 +334,55 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
             filtered_meta = [t for t in filtered_meta if "lm_head" not in t["key"]]
         filtered_meta = [t for t in filtered_meta if not t["key"].endswith("_scale")]
 
-        tensors_meta = get_processing_order(filtered_meta, config.arch_info)
+        text_meta = []
+        visual_meta = []
+        other_meta = []
+        for item in filtered_meta:
+            key = item["key"]
+            if key.startswith("model.visual."):
+                visual_meta.append(item)
+            elif key.startswith("mtp."):
+                other_meta.append(item)
+            else:
+                text_meta.append(item)
+
+        tensors_meta = []
+        sections = []
+
+        if text_meta:
+            ordered_text_meta = get_processing_order(text_meta, config.arch_info)
+            section_start = len(tensors_meta)
+            tensors_meta.extend(ordered_text_meta)
+            sections.append(
+                {
+                    "type": SECTION_TEXT_CORE,
+                    "first_tensor_idx": section_start,
+                    "num_tensors": len(ordered_text_meta),
+                }
+            )
+
+        if visual_meta:
+            ordered_visual_meta = get_visual_processing_order(visual_meta)
+            section_start = len(tensors_meta)
+            tensors_meta.extend(ordered_visual_meta)
+            sections.append(
+                {
+                    "type": SECTION_VISUAL,
+                    "first_tensor_idx": section_start,
+                    "num_tensors": len(ordered_visual_meta),
+                }
+            )
+
+        if other_meta:
+            section_start = len(tensors_meta)
+            tensors_meta.extend(sorted(other_meta, key=lambda item: item["key"]))
+            sections.append(
+                {
+                    "type": SECTION_MTP,
+                    "first_tensor_idx": section_start,
+                    "num_tensors": len(other_meta),
+                }
+            )
 
         for item in tensors_meta:
             key = item["key"]
@@ -289,12 +390,13 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
             file_path = item["file"]
 
             row = shape[0] if len(shape) >= 1 else 1
-            col = shape[1] if len(shape) >= 2 else 1
+            col = math.prod(shape[1:]) if len(shape) >= 2 else 1
 
             is_1d = col == 1
             is_embedding = (config.arch_info.embedding_pattern in key and "lm_head" not in key)
+            is_visual_pos_embed = key.endswith("pos_embed.weight")
             is_lm_head = "lm_head" in key
-            should_quantize = not (is_1d or is_embedding or is_lm_head)
+            should_quantize = not (is_1d or is_embedding or is_visual_pos_embed or is_lm_head)
 
             # Only promote axes that correspond to model dimensions that expand
             # from *_orig to aligned runtime dims. Arbitrary axes stay raw in
@@ -318,7 +420,7 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
 
             if needs_padding:
                 padded_row = orig_shape[0] if len(orig_shape) >= 1 else 1
-                padded_col = orig_shape[1] if len(orig_shape) >= 2 else 1
+                padded_col = math.prod(orig_shape[1:]) if len(orig_shape) >= 2 else 1
 
             # Look up absolute offset and dtype
             header = shard_headers[file_path]
@@ -383,17 +485,6 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
                 "scale_offset": scale_offset,
                 "scale_size": scale_size,
             })
-
-    # Tensor sections
-    sections = []
-    if tensor_entries:
-        sections.append(
-            {
-                "type": SECTION_TEXT_CORE,
-                "first_tensor_idx": 0,
-                "num_tensors": len(tensor_entries),
-            }
-        )
 
     # LoRA section
     lora_entries = None

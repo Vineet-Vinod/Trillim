@@ -253,6 +253,61 @@ class QuantizeTests(unittest.TestCase):
         )
         return str(model_dir)
 
+    def _write_qwen_multimodal_model(self, root: str) -> str:
+        model_dir = Path(root) / "qwen-multimodal"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["Qwen3_5ForConditionalGeneration"],
+                    "model_type": "qwen3_5",
+                    "text_config": {
+                        "hidden_size": 2560,
+                        "intermediate_size": 9216,
+                        "num_hidden_layers": 1,
+                        "num_attention_heads": 16,
+                        "num_key_value_heads": 4,
+                        "head_dim": 256,
+                        "vocab_size": 248320,
+                        "max_position_embeddings": 262144,
+                        "rms_norm_eps": 1e-6,
+                        "rope_parameters": {"rope_theta": 10000000.0},
+                        "tie_word_embeddings": True,
+                        "attention_bias": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+        save_file(
+            {
+                "model.language_model.embed_tokens.weight": np.zeros((16, 2560), dtype=np.float16),
+                "model.language_model.layers.0.input_layernorm.weight": np.zeros((2560,), dtype=np.float16),
+                "model.language_model.layers.0.self_attn.q_proj.weight": np.zeros((2560, 2560), dtype=np.float16),
+                "model.language_model.layers.0.self_attn.k_proj.weight": np.zeros((640, 2560), dtype=np.float16),
+                "model.language_model.layers.0.self_attn.v_proj.weight": np.zeros((640, 2560), dtype=np.float16),
+                "model.language_model.layers.0.self_attn.o_proj.weight": np.zeros((2560, 2560), dtype=np.float16),
+                "model.language_model.layers.0.mlp.gate_proj.weight": np.zeros((9216, 2560), dtype=np.float16),
+                "model.language_model.layers.0.mlp.up_proj.weight": np.zeros((9216, 2560), dtype=np.float16),
+                "model.language_model.layers.0.mlp.down_proj.weight": np.zeros((2560, 9216), dtype=np.float16),
+                "model.language_model.norm.weight": np.zeros((2560,), dtype=np.float16),
+                "model.visual.patch_embed.proj.weight": np.zeros((1024, 3, 2, 2), dtype=np.float16),
+                "model.visual.patch_embed.proj.bias": np.zeros((1024,), dtype=np.float16),
+                "model.visual.pos_embed.weight": np.zeros((16, 1024), dtype=np.float16),
+                "model.visual.blocks.0.norm1.weight": np.zeros((1024,), dtype=np.float16),
+                "model.visual.blocks.0.attn.qkv.weight": np.zeros((3072, 1024), dtype=np.float16),
+                "model.visual.blocks.0.attn.proj.weight": np.zeros((1024, 1024), dtype=np.float16),
+                "model.visual.blocks.0.norm2.weight": np.zeros((1024,), dtype=np.float16),
+                "model.visual.blocks.0.mlp.linear_fc1.weight": np.zeros((4096, 1024), dtype=np.float16),
+                "model.visual.blocks.0.mlp.linear_fc2.weight": np.zeros((1024, 4096), dtype=np.float16),
+                "model.visual.merger.linear_fc1.weight": np.zeros((4096, 1024), dtype=np.float16),
+                "model.visual.merger.linear_fc2.weight": np.zeros((2560, 4096), dtype=np.float16),
+            },
+            str(model_dir / "model.safetensors"),
+        )
+        return str(model_dir)
+
     def _write_adapter(
         self,
         root: str,
@@ -492,7 +547,6 @@ class QuantizeTests(unittest.TestCase):
                     {
                         "weight_map": {
                             "model.language_model.embed_tokens.weight": "model-00001-of-00002.safetensors",
-                            "model.visual.merger.linear_fc1.weight": "model-00001-of-00002.safetensors",
                             "mtp.fc.weight": "model-00002-of-00002.safetensors",
                         }
                     }
@@ -507,9 +561,42 @@ class QuantizeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                r"Qwen3\.5 multimodal checkpoints are not supported.*model\.visual\.\*, mtp\.\*",
+                r"Qwen3\.5 MTP tensors are not supported.*mtp\.\*",
             ):
                 quantize.write_manifest(str(model_dir), config)
+
+    def test_write_manifest_supports_qwen35_text_and_visual_sections(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = self._write_qwen_multimodal_model(temp_dir)
+            config = ModelConfig.from_config_json(
+                os.path.join(model_dir, "config.json"),
+                model_dir=model_dir,
+            )
+
+            manifest = _read_manifest(quantize.write_manifest(model_dir, config))
+
+        self.assertEqual(
+            manifest["sections"],
+            [
+                {"type": quantize.SECTION_TEXT_CORE, "first_tensor_idx": 0, "num_tensors": 10},
+                {"type": quantize.SECTION_VISUAL, "first_tensor_idx": 10, "num_tensors": 11},
+            ],
+        )
+        visual_pos_entry = next(
+            entry for entry in manifest["tensors"]
+            if entry["row"] == 16 and entry["col"] == 1024
+        )
+        visual_qkv_entry = next(
+            entry for entry in manifest["tensors"]
+            if entry["row"] == 3072 and entry["col"] == 1024
+        )
+        patch_proj_entry = next(
+            entry for entry in manifest["tensors"]
+            if entry["row"] == 1024 and entry["col"] == 12
+        )
+        self.assertEqual(visual_pos_entry["action"], quantize.ACTION_BF16_RAW)
+        self.assertEqual(visual_qkv_entry["action"], quantize.ACTION_TERNARY_QUANTIZE)
+        self.assertEqual(patch_proj_entry["action"], quantize.ACTION_TERNARY_QUANTIZE)
 
     def test_write_manifest_handles_inconsistent_shard_maps_in_mocked_inputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
