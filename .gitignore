@@ -17,9 +17,3 @@ src/trillim/_bin/*
 
 # Secrets
 .env
-
-# Finetune artifacts
-finetune/checkpoints/
-finetune/finetuned_model/
-finetune/dataset/*
-!finetune/dataset/.gitkeep

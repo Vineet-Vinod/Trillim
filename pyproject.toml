@@ -1,12 +1,12 @@
 [project]
 name = "trillim"
 version = "0.6.0"
-description = "The fastest inference framework to run BitNet models on CPUs"
+description = "The fastest inference framework to run AI on CPUs"
 readme = "README.md"
 license = {file = "LICENSE"}
 license-files = ["LICENSE", "THIRD_PARTY_LICENSES"]
 authors = [{name = "Vineet V", email = "vineetv314@gmail.com"}]
-keywords = ["bitnet", "inference", "cpu", "ternary", "llm", "1-bit"]
+keywords = ["bitnet", "inference", "cpu", "ternary", "llm", "ai"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",

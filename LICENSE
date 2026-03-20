@@ -27,7 +27,7 @@ Proprietary Components
 The following components are NOT covered by the MIT License above and are
 governed by the Trillim Proprietary EULA below:
 
-  - Pre-compiled binaries          trillim/_bin/inference, trillim/_bin/trillim-quantize
+  - Pre-compiled binaries          trillim/_bin/trillim-inference, trillim/_bin/trillim-quantize
   - Wheel build script             scripts/build_wheels.py
 
 ---
