@@ -1,6 +1,7 @@
 __pycache__
 .venv
-.claude
+.pytest_cache
+.ruff_cache
 
 # Build / packaging artifacts
 *.egg-info/
