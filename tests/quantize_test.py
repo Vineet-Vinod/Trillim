@@ -17,7 +17,7 @@ from unittest.mock import patch
 import numpy as np
 from safetensors.numpy import save_file
 
-from trillim.model_arch import ARCH_REGISTRY, ArchType, LORA_TARGETS
+from trillim.model_arch import ARCH_REGISTRY, ArchType, LORA_TARGETS, ModelConfig
 import trillim.quantize as quantize
 
 
@@ -188,6 +188,56 @@ class QuantizeTests(unittest.TestCase):
 
         return str(model_dir)
 
+    def _write_qwen_model(self, root: str) -> str:
+        model_dir = Path(root) / "qwen-model"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "_name_or_path": "Org/Qwen3.5-4B",
+                    "architectures": ["Qwen3_5ForConditionalGeneration"],
+                    "model_type": "qwen3_5",
+                    "rope_theta": 123.0,
+                    "max_position_embeddings": 456,
+                    "text_config": {
+                        "hidden_size": 2560,
+                        "intermediate_size": 9216,
+                        "num_hidden_layers": 1,
+                        "num_attention_heads": 16,
+                        "num_key_value_heads": 4,
+                        "head_dim": 160,
+                        "vocab_size": 248320,
+                        "max_position_embeddings": 262144,
+                        "rms_norm_eps": 1e-6,
+                        "rope_theta": 10000000.0,
+                        "hidden_act": "silu",
+                        "eos_token_id": 248044,
+                        "tie_word_embeddings": True,
+                        "attention_bias": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+        save_file(
+            {
+                "model.embed_tokens.weight": np.zeros((16, 2560), dtype=np.float16),
+                "model.layers.0.input_layernorm.weight": np.zeros((2560,), dtype=np.float16),
+                "model.layers.0.self_attn.q_proj.weight": np.zeros((2560, 2560), dtype=np.float16),
+                "model.layers.0.self_attn.k_proj.weight": np.zeros((640, 2560), dtype=np.float16),
+                "model.layers.0.self_attn.v_proj.weight": np.zeros((640, 2560), dtype=np.float16),
+                "model.layers.0.self_attn.o_proj.weight": np.zeros((2560, 2560), dtype=np.float16),
+                "model.layers.0.mlp.gate_proj.weight": np.zeros((9216, 2560), dtype=np.float16),
+                "model.layers.0.mlp.up_proj.weight": np.zeros((9216, 2560), dtype=np.float16),
+                "model.layers.0.mlp.down_proj.weight": np.zeros((2560, 9216), dtype=np.float16),
+                "model.norm.weight": np.zeros((2560,), dtype=np.float16),
+                "model.layers.0.self_attn.rotary_emb.inv_freq": np.zeros((80,), dtype=np.float32),
+            },
+            str(model_dir / "model.safetensors"),
+        )
+        return str(model_dir)
+
     def _write_adapter(
         self,
         root: str,
@@ -342,6 +392,39 @@ class QuantizeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(FileNotFoundError, "No model.safetensors"):
                 quantize.write_manifest(str(empty_model), self._config())
+
+    def test_write_manifest_supports_qwen35_model_config_and_tensor_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = self._write_qwen_model(temp_dir)
+            config = ModelConfig.from_config_json(
+                os.path.join(model_dir, "config.json"),
+                model_dir=model_dir,
+            )
+
+            manifest = _read_manifest(quantize.write_manifest(model_dir, config))
+
+        self.assertEqual(config.arch_type, ArchType.QWEN35)
+        self.assertEqual(config.rope_theta, 10000000.0)
+        self.assertEqual(config.max_position_embeddings, 262144)
+        self.assertTrue(config.tie_word_embeddings)
+        self.assertEqual(len(manifest["tensors"]), 10)
+
+        embedding_entry = manifest["tensors"][0]
+        norm_entry = manifest["tensors"][1]
+        q_proj_entry = next(
+            entry for entry in manifest["tensors"]
+            if entry["row"] == 2560 and entry["col"] == 2560 and entry["action"] == quantize.ACTION_TERNARY_QUANTIZE
+        )
+        k_proj_entry = next(
+            entry for entry in manifest["tensors"]
+            if entry["row"] == 640 and entry["col"] == 2560
+        )
+
+        self.assertEqual(embedding_entry["action"], quantize.ACTION_BF16_RAW)
+        self.assertEqual(norm_entry["action"], quantize.ACTION_BF16_RAW)
+        self.assertEqual(q_proj_entry["action"], quantize.ACTION_TERNARY_QUANTIZE)
+        self.assertEqual((q_proj_entry["row"], q_proj_entry["col"]), (2560, 2560))
+        self.assertEqual((k_proj_entry["row"], k_proj_entry["col"]), (640, 2560))
 
     def test_write_manifest_handles_inconsistent_shard_maps_in_mocked_inputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -787,7 +870,6 @@ class QuantizeTests(unittest.TestCase):
         with patch.object(__import__("sys"), "argv", ["trillim quantize", "model"]):
             with self.assertRaisesRegex(ValueError, "specify --model and/or --adapter"):
                 runpy.run_path(quantize.__file__, run_name="__main__")
-
 
 if __name__ == "__main__":
     unittest.main()
