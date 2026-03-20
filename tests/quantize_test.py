@@ -50,9 +50,20 @@ def _read_manifest(path: str) -> dict:
                 }
             )
 
+        section_count = struct.unpack("<I", handle.read(4))[0]
+        sections = []
+        for _ in range(section_count):
+            sections.append(
+                {
+                    "type": struct.unpack("<B", handle.read(1))[0],
+                    "first_tensor_idx": struct.unpack("<I", handle.read(4))[0],
+                    "num_tensors": struct.unpack("<I", handle.read(4))[0],
+                }
+            )
+
         remainder = handle.read()
         if not remainder:
-            return {"shards": shards, "tensors": tensors, "lora": None}
+            return {"shards": shards, "tensors": tensors, "sections": sections, "lora": None}
 
     offset = 0
 
@@ -95,6 +106,7 @@ def _read_manifest(path: str) -> dict:
     return {
         "shards": shards,
         "tensors": tensors,
+        "sections": sections,
         "lora": {
             "num_layers": num_layers,
             "targets_per_layer": targets_per_layer,
@@ -352,6 +364,10 @@ class QuantizeTests(unittest.TestCase):
 
             self.assertEqual(len(manifest["shards"]), 1)
             self.assertEqual(len(manifest["tensors"]), 8)
+            self.assertEqual(
+                manifest["sections"],
+                [{"type": quantize.SECTION_TEXT_CORE, "first_tensor_idx": 0, "num_tensors": 8}],
+            )
 
             embedding_entry = manifest["tensors"][0]
             self.assertEqual(embedding_entry["action"], quantize.ACTION_BF16_RAW)
@@ -378,6 +394,10 @@ class QuantizeTests(unittest.TestCase):
             sharded_model = self._write_model(temp_dir, sharded=True)
             manifest = _read_manifest(quantize.write_manifest(sharded_model, self._config()))
             self.assertEqual(len(manifest["shards"]), 2)
+            self.assertEqual(
+                manifest["sections"],
+                [{"type": quantize.SECTION_TEXT_CORE, "first_tensor_idx": 0, "num_tensors": len(manifest["tensors"])}],
+            )
 
             empty_model = Path(temp_dir) / "empty-model"
             empty_model.mkdir()
@@ -412,6 +432,10 @@ class QuantizeTests(unittest.TestCase):
         self.assertTrue(config.tie_word_embeddings)
         self.assertEqual(config.arch_info.final_norm_pattern, "model.language_model.norm.weight")
         self.assertEqual(len(manifest["tensors"]), 12)
+        self.assertEqual(
+            manifest["sections"],
+            [{"type": quantize.SECTION_TEXT_CORE, "first_tensor_idx": 0, "num_tensors": 12}],
+        )
 
         embedding_entry = manifest["tensors"][0]
         norm_entry = manifest["tensors"][1]

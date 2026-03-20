@@ -136,6 +136,11 @@ ACTION_TERNARY_QUANTIZE = 1
 # ACTION_EMBEDDING_I8     = 2 (removed in Quantization v2 update)
 ACTION_REPACK_TERNARY   = 3
 
+# Tensor section codes (match C++ TensorSectionType enum)
+SECTION_TEXT_CORE = 1
+SECTION_VISUAL = 2
+SECTION_MTP = 3
+
 # Dtype codes (match C++ DType enum)
 DTYPE_F32  = 0
 DTYPE_F16  = 1
@@ -379,6 +384,17 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
                 "scale_size": scale_size,
             })
 
+    # Tensor sections
+    sections = []
+    if tensor_entries:
+        sections.append(
+            {
+                "type": SECTION_TEXT_CORE,
+                "first_tensor_idx": 0,
+                "num_tensors": len(tensor_entries),
+            }
+        )
+
     # LoRA section
     lora_entries = None
     lora_scale = 0.0
@@ -414,6 +430,13 @@ def write_manifest(model_dir, config: ModelConfig, adapter_dir=None, skip_model=
             f.write(struct.pack("<H", e["scale_shard_idx"]))
             f.write(struct.pack("<Q", e["scale_offset"]))
             f.write(struct.pack("<Q", e["scale_size"]))
+
+        # Tensor sections
+        f.write(struct.pack("<I", len(sections)))
+        for section in sections:
+            f.write(struct.pack("<B", section["type"]))
+            f.write(struct.pack("<I", section["first_tensor_idx"]))
+            f.write(struct.pack("<I", section["num_tensors"]))
 
         # LoRA entries
         if lora_entries is not None:
