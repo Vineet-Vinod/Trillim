@@ -26,6 +26,8 @@ def _cmd_quantize(args):
             argv.append("--model")
         if args.adapter:
             argv.extend(["--adapter", args.adapter])
+        if args.language_model_only:
+            argv.append("--language-model-only")
         sys.argv = argv
 
         from trillim.quantize import main
@@ -238,6 +240,11 @@ def main():
     p_quant.add_argument("model_dir", help="Path to model directory with config.json")
     p_quant.add_argument("--model", action="store_true", help="Quantize model weights → <model_dir>-TRNQ/")
     p_quant.add_argument("--adapter", help="Extract LoRA adapter from PEFT directory → qmodel.lora")
+    p_quant.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="For multimodal checkpoints, quantize only the language model tensors for text inference",
+    )
     p_quant.set_defaults(func=_cmd_quantize)
 
     # --- chat ---

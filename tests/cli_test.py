@@ -74,7 +74,12 @@ class CliTests(unittest.TestCase):
         def quantize_main():
             seen_argv[:] = sys.argv
 
-        args = SimpleNamespace(model_dir="Org/Model", model=True, adapter="/adapter")
+        args = SimpleNamespace(
+            model_dir="Org/Model",
+            model=True,
+            adapter="/adapter",
+            language_model_only=True,
+        )
 
         with (
             patch("trillim.cli._resolve", side_effect=lambda ns: setattr(ns, "model_dir", "/resolved/model")),
@@ -83,10 +88,25 @@ class CliTests(unittest.TestCase):
         ):
             cli._cmd_quantize(args)
 
-        self.assertEqual(seen_argv, ["trillim", "/resolved/model", "--model", "--adapter", "/adapter"])
+        self.assertEqual(
+            seen_argv,
+            [
+                "trillim",
+                "/resolved/model",
+                "--model",
+                "--adapter",
+                "/adapter",
+                "--language-model-only",
+            ],
+        )
 
     def test_cmd_quantize_exits_on_errors(self):
-        args = SimpleNamespace(model_dir="Org/Model", model=False, adapter=None)
+        args = SimpleNamespace(
+            model_dir="Org/Model",
+            model=False,
+            adapter=None,
+            language_model_only=False,
+        )
         stderr = io.StringIO()
 
         with (

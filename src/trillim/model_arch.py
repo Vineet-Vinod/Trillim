@@ -89,6 +89,17 @@ ARCH_REGISTRY: dict[str, ArchInfo] = {
         has_ffn_sub_norm=False,
         component_order=[
             "input_layernorm",
+            "linear_attn.A_log",
+            "linear_attn.conv1d.weight",
+            "linear_attn.dt_bias",
+            "linear_attn.in_proj_a.weight",
+            "linear_attn.in_proj_b.weight",
+            "linear_attn.in_proj_qkv.weight",
+            "linear_attn.in_proj_z.weight",
+            "linear_attn.norm.weight",
+            "linear_attn.out_proj.weight",
+            "self_attn.k_norm.weight",
+            "self_attn.q_norm.weight",
             "self_attn.k_proj",
             "self_attn.v_proj",
             "self_attn.q_proj",
@@ -336,6 +347,29 @@ def _resolve_tied_embeddings(config: dict, tensor_names: Optional[list[str]]) ->
     return tie_word_embeddings
 
 
+def _extract_qwen35_fields(config: dict, arch_type: ArchType) -> dict[str, object]:
+    if arch_type != ArchType.QWEN35:
+        return {
+            "layer_types": [],
+            "attn_output_gate": False,
+            "linear_num_key_heads": 0,
+            "linear_num_value_heads": 0,
+            "linear_key_head_dim": 0,
+            "linear_value_head_dim": 0,
+            "linear_conv_kernel_dim": 0,
+        }
+
+    return {
+        "layer_types": list(config.get("layer_types", [])),
+        "attn_output_gate": bool(config.get("attn_output_gate", False)),
+        "linear_num_key_heads": int(config.get("linear_num_key_heads", 0)),
+        "linear_num_value_heads": int(config.get("linear_num_value_heads", 0)),
+        "linear_key_head_dim": int(config.get("linear_key_head_dim", 0)),
+        "linear_value_head_dim": int(config.get("linear_value_head_dim", 0)),
+        "linear_conv_kernel_dim": int(config.get("linear_conv_kernel_dim", 0)),
+    }
+
+
 def _collect_added_token_ids(
     tokenizer_data: Optional[dict],
     token_names: tuple[str, ...] = _STOP_TOKEN_NAMES,
@@ -422,6 +456,13 @@ class ModelConfig:
     tie_word_embeddings: bool = True
     hidden_dim_orig: int = 0
     intermediate_dim_orig: int = 0
+    layer_types: list[str] | None = None
+    attn_output_gate: bool = False
+    linear_num_key_heads: int = 0
+    linear_num_value_heads: int = 0
+    linear_key_head_dim: int = 0
+    linear_value_head_dim: int = 0
+    linear_conv_kernel_dim: int = 0
 
     @classmethod
     def from_config_json(
@@ -441,6 +482,7 @@ class ModelConfig:
         arch_info, has_qkv_bias = _resolve_qkv_bias(arch_info, config, tensor_names)
         tie_word_embeddings = _resolve_tied_embeddings(config, tensor_names)
         eos_tokens = _collect_eos_tokens(config, arch_info.arch_type, model_dir, adapter_dir)
+        qwen35_fields = _extract_qwen35_fields(config, arch_info.arch_type)
 
         return cls(
             arch_type=arch_info.arch_type,
@@ -460,4 +502,11 @@ class ModelConfig:
             tie_word_embeddings=tie_word_embeddings,
             hidden_dim_orig=dims["hidden_dim_orig"],
             intermediate_dim_orig=dims["intermediate_dim_orig"],
+            layer_types=qwen35_fields["layer_types"],
+            attn_output_gate=qwen35_fields["attn_output_gate"],
+            linear_num_key_heads=qwen35_fields["linear_num_key_heads"],
+            linear_num_value_heads=qwen35_fields["linear_num_value_heads"],
+            linear_key_head_dim=qwen35_fields["linear_key_head_dim"],
+            linear_value_head_dim=qwen35_fields["linear_value_head_dim"],
+            linear_conv_kernel_dim=qwen35_fields["linear_conv_kernel_dim"],
         )

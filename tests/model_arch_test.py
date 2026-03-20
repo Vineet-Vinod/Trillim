@@ -212,6 +212,13 @@ class ModelArchTests(unittest.TestCase):
                         "num_attention_heads": 16,
                         "num_key_value_heads": 4,
                         "head_dim": 256,
+                        "layer_types": ["linear_attention", "full_attention"],
+                        "attn_output_gate": True,
+                        "linear_num_key_heads": 16,
+                        "linear_num_value_heads": 32,
+                        "linear_key_head_dim": 128,
+                        "linear_value_head_dim": 128,
+                        "linear_conv_kernel_dim": 4,
                         "vocab_size": 248320,
                         "max_position_embeddings": 262144,
                         "rms_norm_eps": 1e-6,
@@ -251,6 +258,13 @@ class ModelArchTests(unittest.TestCase):
         self.assertTrue(config.tie_word_embeddings)
         self.assertFalse(config.has_qkv_bias)
         self.assertEqual(config.eos_tokens, [248044])
+        self.assertEqual(config.layer_types, ["linear_attention", "full_attention"])
+        self.assertTrue(config.attn_output_gate)
+        self.assertEqual(config.linear_num_key_heads, 16)
+        self.assertEqual(config.linear_num_value_heads, 32)
+        self.assertEqual(config.linear_key_head_dim, 128)
+        self.assertEqual(config.linear_value_head_dim, 128)
+        self.assertEqual(config.linear_conv_kernel_dim, 4)
 
     def test_from_config_json_collects_and_dedupes_eos_tokens_from_model_and_adapter(self):
         with tempfile.TemporaryDirectory() as temp_dir:

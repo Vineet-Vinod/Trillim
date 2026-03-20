@@ -218,6 +218,13 @@ class QuantizeTests(unittest.TestCase):
                         "num_attention_heads": 16,
                         "num_key_value_heads": 4,
                         "head_dim": 160,
+                        "layer_types": ["full_attention"],
+                        "attn_output_gate": True,
+                        "linear_num_key_heads": 16,
+                        "linear_num_value_heads": 32,
+                        "linear_key_head_dim": 128,
+                        "linear_value_head_dim": 128,
+                        "linear_conv_kernel_dim": 4,
                         "vocab_size": 248320,
                         "max_position_embeddings": 262144,
                         "rms_norm_eps": 1e-6,
@@ -407,6 +414,44 @@ class QuantizeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown safetensors dtype"):
             quantize._safetensors_dtype_code("BAD")
 
+    def test_processing_order_explicitly_covers_qwen35_text_components(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = self._write_qwen_model(temp_dir)
+            qwen_config = ModelConfig.from_config_json(
+                os.path.join(model_dir, "config.json"),
+                model_dir=model_dir,
+            )
+
+        ordered = quantize.get_processing_order(
+            [
+                {"key": "model.language_model.layers.0.mlp.down_proj.weight"},
+                {"key": "model.language_model.layers.0.linear_attn.out_proj.weight"},
+                {"key": "model.language_model.layers.0.self_attn.q_proj.weight"},
+                {"key": "model.language_model.layers.0.post_attention_layernorm.weight"},
+                {"key": "model.language_model.layers.0.input_layernorm.weight"},
+                {"key": "model.language_model.layers.0.self_attn.q_norm.weight"},
+                {"key": "model.language_model.layers.0.linear_attn.norm.weight"},
+                {"key": "model.language_model.norm.weight"},
+                {"key": "model.language_model.embed_tokens.weight"},
+            ],
+            qwen_config.arch_info,
+        )
+
+        self.assertEqual(
+            [item["key"] for item in ordered],
+            [
+                "model.language_model.embed_tokens.weight",
+                "model.language_model.norm.weight",
+                "model.language_model.layers.0.input_layernorm.weight",
+                "model.language_model.layers.0.linear_attn.norm.weight",
+                "model.language_model.layers.0.linear_attn.out_proj.weight",
+                "model.language_model.layers.0.self_attn.q_norm.weight",
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+                "model.language_model.layers.0.post_attention_layernorm.weight",
+                "model.language_model.layers.0.mlp.down_proj.weight",
+            ],
+        )
+
     def test_header_parsing_and_manifest_generation_cover_actions_padding_and_scales(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             model_dir = self._write_model(temp_dir)
@@ -486,6 +531,13 @@ class QuantizeTests(unittest.TestCase):
         self.assertEqual(config.max_position_embeddings, 262144)
         self.assertTrue(config.tie_word_embeddings)
         self.assertEqual(config.arch_info.final_norm_pattern, "model.language_model.norm.weight")
+        self.assertEqual(config.layer_types, ["full_attention"])
+        self.assertTrue(config.attn_output_gate)
+        self.assertEqual(config.linear_num_key_heads, 16)
+        self.assertEqual(config.linear_num_value_heads, 32)
+        self.assertEqual(config.linear_key_head_dim, 128)
+        self.assertEqual(config.linear_value_head_dim, 128)
+        self.assertEqual(config.linear_conv_kernel_dim, 4)
         self.assertEqual(len(manifest["tensors"]), 12)
         self.assertEqual(
             manifest["sections"],
