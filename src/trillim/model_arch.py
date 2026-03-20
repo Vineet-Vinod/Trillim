@@ -324,6 +324,18 @@ def _resolve_rope_theta(config: dict) -> float:
     return 10000.0
 
 
+def _resolve_partial_rotary_factor(config: dict) -> float:
+    rope_parameters = config.get("rope_parameters")
+    if isinstance(rope_parameters, dict):
+        factor = rope_parameters.get("partial_rotary_factor")
+        if factor is not None:
+            return float(factor)
+    factor = config.get("partial_rotary_factor")
+    if factor is not None:
+        return float(factor)
+    return 1.0
+
+
 def _resolve_qkv_bias(
     arch_info: ArchInfo,
     config: dict,
@@ -451,6 +463,7 @@ class ModelConfig:
     max_position_embeddings: int
     norm_eps: float
     rope_theta: float
+    partial_rotary_factor: float
     eos_tokens: list[int]
     has_qkv_bias: bool = False
     tie_word_embeddings: bool = True
@@ -478,6 +491,7 @@ class ModelConfig:
         dims = _extract_dimensions(config)
         norm_eps = config.get("rms_norm_eps", config.get("layer_norm_epsilon", 1e-6))
         rope_theta = _resolve_rope_theta(config)
+        partial_rotary_factor = _resolve_partial_rotary_factor(config)
         arch_info = _resolve_activation(arch_info, config)
         arch_info, has_qkv_bias = _resolve_qkv_bias(arch_info, config, tensor_names)
         tie_word_embeddings = _resolve_tied_embeddings(config, tensor_names)
@@ -497,6 +511,7 @@ class ModelConfig:
             max_position_embeddings=dims["max_position_embeddings"],
             norm_eps=norm_eps,
             rope_theta=rope_theta,
+            partial_rotary_factor=partial_rotary_factor,
             eos_tokens=eos_tokens,
             has_qkv_bias=has_qkv_bias,
             tie_word_embeddings=tie_word_embeddings,

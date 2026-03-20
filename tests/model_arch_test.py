@@ -156,6 +156,7 @@ class ModelArchTests(unittest.TestCase):
                     "num_key_value_heads": 4,
                     "rms_norm_eps": 1e-5,
                     "rope_theta": 500000.0,
+                    "partial_rotary_factor": 0.5,
                     "max_position_embeddings": 8192,
                 },
             )
@@ -169,6 +170,7 @@ class ModelArchTests(unittest.TestCase):
         self.assertEqual(config.max_position_embeddings, 8192)
         self.assertEqual(config.norm_eps, 1e-5)
         self.assertEqual(config.rope_theta, 500000.0)
+        self.assertEqual(config.partial_rotary_factor, 0.5)
 
     def test_from_config_json_keeps_arch_default_activation_when_override_matches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -224,6 +226,7 @@ class ModelArchTests(unittest.TestCase):
                         "rms_norm_eps": 1e-6,
                         "rope_parameters": {
                             "rope_theta": 10000000.0,
+                            "partial_rotary_factor": 0.25,
                         },
                         "hidden_act": "silu",
                         "eos_token_id": 248044,
@@ -255,6 +258,7 @@ class ModelArchTests(unittest.TestCase):
         self.assertEqual(config.max_position_embeddings, 262144)
         self.assertEqual(config.norm_eps, 1e-6)
         self.assertEqual(config.rope_theta, 10000000.0)
+        self.assertEqual(config.partial_rotary_factor, 0.25)
         self.assertTrue(config.tie_word_embeddings)
         self.assertFalse(config.has_qkv_bias)
         self.assertEqual(config.eos_tokens, [248044])

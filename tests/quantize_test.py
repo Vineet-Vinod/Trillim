@@ -131,6 +131,7 @@ class QuantizeTests(unittest.TestCase):
             "head_dim": 32,
             "norm_eps": 1e-5,
             "rope_theta": 500000.0,
+            "partial_rotary_factor": 1.0,
             "max_position_embeddings": 4096,
             "tie_word_embeddings": False,
         }
@@ -230,6 +231,7 @@ class QuantizeTests(unittest.TestCase):
                         "rms_norm_eps": 1e-6,
                         "rope_parameters": {
                             "rope_theta": 10000000.0,
+                            "partial_rotary_factor": 0.25,
                         },
                         "hidden_act": "silu",
                         "eos_token_id": 248044,
@@ -528,6 +530,7 @@ class QuantizeTests(unittest.TestCase):
 
         self.assertEqual(config.arch_type, ArchType.QWEN35)
         self.assertEqual(config.rope_theta, 10000000.0)
+        self.assertEqual(config.partial_rotary_factor, 0.25)
         self.assertEqual(config.max_position_embeddings, 262144)
         self.assertTrue(config.tie_word_embeddings)
         self.assertEqual(config.arch_info.final_norm_pattern, "model.language_model.norm.weight")
@@ -829,8 +832,10 @@ class QuantizeTests(unittest.TestCase):
 
             rope_theta_index = seen_cmds[0].index("--rope-theta")
             max_pos_index = seen_cmds[0].index("--max-pos")
+            rope_dim_index = seen_cmds[0].index("--rope-dim")
             self.assertEqual(seen_cmds[0][rope_theta_index + 1], str(config.rope_theta))
             self.assertEqual(seen_cmds[0][max_pos_index + 1], str(config.max_position_embeddings))
+            self.assertEqual(seen_cmds[0][rope_dim_index + 1], str(config.head_dim))
 
             with self.assertRaisesRegex(ValueError, "model_output_dir and model_dir resolve to the same path"):
                 quantize._run_cpp_quantizer("/fake/bin", model_dir, config, model_dir)
@@ -885,6 +890,7 @@ class QuantizeTests(unittest.TestCase):
                 arch_type=ArchType.QWEN35,
                 arch_info=ARCH_REGISTRY["qwen3_5forconditionalgeneration"],
                 rope_theta=10000000.0,
+                partial_rotary_factor=0.25,
                 max_position_embeddings=262144,
             )
             seen_cmds: list[list[str]] = []
@@ -911,8 +917,10 @@ class QuantizeTests(unittest.TestCase):
 
             rope_theta_index = seen_cmds[0].index("--rope-theta")
             max_pos_index = seen_cmds[0].index("--max-pos")
+            rope_dim_index = seen_cmds[0].index("--rope-dim")
             self.assertEqual(seen_cmds[0][rope_theta_index + 1], "10000000.0")
             self.assertEqual(seen_cmds[0][max_pos_index + 1], "262144")
+            self.assertEqual(seen_cmds[0][rope_dim_index + 1], "8")
 
     def test_run_cpp_lora_only_and_file_copy_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:

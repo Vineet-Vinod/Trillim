@@ -719,6 +719,7 @@ def _run_cpp_quantizer(binary_path, model_dir, config, model_output_dir, adapter
         "--rope-theta", str(config.rope_theta),
         "--max-pos", str(config.max_position_embeddings),
         "--head-dim", str(config.head_dim),
+        "--rope-dim", str(int(round(config.head_dim * config.partial_rotary_factor))),
     ]
 
     # LoRA args
