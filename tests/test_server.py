@@ -40,6 +40,15 @@ class _BrokenStartComponent(_RouteComponent):
         raise RuntimeError("broken start")
 
 
+class _HotSwapAwareComponent(_RouteComponent):
+    def __init__(self, calls: list[str], name: str) -> None:
+        super().__init__(calls, name)
+        self.enabled: bool | None = None
+
+    def _set_hot_swap_routes_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+
 class ServerTests(unittest.TestCase):
     def test_server_requires_components(self):
         with self.assertRaisesRegex(ValueError, "at least one component"):
@@ -75,3 +84,13 @@ class ServerTests(unittest.TestCase):
                 pass
         self.assertEqual(calls, ["ok.start", "bad.start", "ok.stop"])
 
+    def test_server_configures_hot_swap_routes_only_for_llm_components(self):
+        calls: list[str] = []
+        llm_component = _HotSwapAwareComponent(calls, "llm")
+        other_component = _HotSwapAwareComponent(calls, "other")
+
+        server = Server(llm_component, other_component, allow_llm_hot_swap=True)
+        _ = server.app
+
+        self.assertTrue(llm_component.enabled)
+        self.assertFalse(other_component.enabled)

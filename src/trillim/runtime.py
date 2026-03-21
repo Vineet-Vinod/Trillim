@@ -78,6 +78,42 @@ class _RuntimeComponentProxy(_RuntimeManagedProxy):
 class _RuntimeObjectProxy(_RuntimeManagedProxy):
     """Expose a runtime-owned returned object as a sync handle."""
 
+    def __enter__(self):
+        if hasattr(self._managed, "__aenter__"):
+            result = self._runtime._invoke_managed_attr(
+                self._managed,
+                "__aenter__",
+                (),
+                {},
+            )
+            return self._runtime._syncify_result(result)
+        if hasattr(self._managed, "__enter__"):
+            result = self._runtime._invoke_managed_attr(
+                self._managed,
+                "__enter__",
+                (),
+                {},
+            )
+            return self._runtime._syncify_result(result)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if hasattr(self._managed, "__aexit__"):
+            return self._runtime._invoke_managed_attr(
+                self._managed,
+                "__aexit__",
+                (exc_type, exc, tb),
+                {},
+            )
+        if hasattr(self._managed, "__exit__"):
+            return self._runtime._invoke_managed_attr(
+                self._managed,
+                "__exit__",
+                (exc_type, exc, tb),
+                {},
+            )
+        return False
+
     def __iter__(self):
         if not hasattr(self._managed, "__aiter__"):
             raise TypeError(f"{type(self._managed).__name__!r} is not iterable")
@@ -270,4 +306,3 @@ class Runtime:
         if hasattr(result, "__aiter__"):
             return _SyncAsyncIterator(self, result.__aiter__())
         return result
-

@@ -1,0 +1,138 @@
+"""Tests for ChatSession behavior."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+import unittest
+
+from trillim.components.llm import ChatDoneEvent
+from trillim.components.llm.public import LLM
+from trillim.errors import (
+    ProgressTimeoutError,
+    SessionBusyError,
+    SessionClosedError,
+    SessionExhaustedError,
+    SessionStaleError,
+)
+from tests.components.llm.support import (
+    FakeEngineFactory,
+    FakeTokenizer,
+    make_runtime_model,
+    progress_timeout,
+)
+
+
+class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
+    def _make_llm(self, *, responses=None, kv_positions=None, failure=None):
+        return LLM(
+            "models/fake",
+            _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(
+                responses=responses or ["ok"],
+                kv_positions=kv_positions,
+                failure=failure,
+            ),
+        )
+
+    async def test_session_chat_updates_messages_and_usage(self):
+        llm = self._make_llm(responses=["hello"])
+        await llm.start()
+
+        async with llm.open_session([{"role": "user", "content": "Say hi"}]) as session:
+            events = [event async for event in session.stream_chat(max_tokens=8)]
+
+        self.assertIsInstance(events[-1], ChatDoneEvent)
+        self.assertEqual(session.messages[-1]["role"], "assistant")
+        self.assertEqual(session.messages[-1]["content"], "hello")
+        await llm.stop()
+
+    async def test_session_is_single_consumer(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        await session._begin_consumer()
+        with self.assertRaisesRegex(SessionBusyError, "active consumer"):
+            session.add_user("again")
+        session._consumer_active = False
+        session._active_task = None
+        await llm.stop()
+
+    async def test_session_stales_after_swap_request(self):
+        llm = self._make_llm(responses=["one", "two"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        await llm.swap_model("models/other")
+
+        with self.assertRaisesRegex(SessionStaleError, "stale"):
+            session.add_user("again")
+        await llm.stop()
+
+    async def test_session_close_marks_session_closed(self):
+        llm = self._make_llm()
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        await session.close()
+
+        with self.assertRaisesRegex(SessionClosedError, "closed"):
+            session.add_user("x")
+        await llm.stop()
+
+    async def test_session_close_waits_for_active_consumer_cleanup(self):
+        llm = self._make_llm()
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def blocking_stream_events(*_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cleaned.set()
+            if False:
+                yield None
+
+        llm._harness.stream_events = blocking_stream_events
+
+        async def consume():
+            async for _event in session.stream_chat(max_tokens=8):
+                pass
+
+        task = asyncio.create_task(consume())
+        await started.wait()
+
+        await session.close()
+
+        self.assertTrue(task.done())
+        self.assertTrue(cleaned.is_set())
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await llm.stop()
+
+    async def test_session_exhausts_after_kv_position_limit(self):
+        llm = self._make_llm(responses=["ok"], kv_positions=[256 * 1024])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        await session.chat(max_tokens=8)
+
+        with self.assertRaises(SessionExhaustedError):
+            session.add_user("again")
+        await llm.stop()
+
+    async def test_session_recovers_from_progress_timeout_and_raises_public_error(self):
+        llm = self._make_llm(failure=progress_timeout())
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        with self.assertRaises(ProgressTimeoutError):
+            await session.chat(max_tokens=8)
+
+        self.assertEqual(llm.state.value, "running")
+        await llm.stop()

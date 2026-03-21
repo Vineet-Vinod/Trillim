@@ -41,10 +41,15 @@ class Server:
     def app(self) -> FastAPI:
         """Return the lazily constructed FastAPI application."""
         if self._app is None:
+            for component in self._components:
+                configure = getattr(component, "_set_hot_swap_routes_enabled", None)
+                if callable(configure):
+                    configure(
+                        self._allow_llm_hot_swap and component.component_name == "llm"
+                    )
             self._app = build_app(self._components)
         return self._app
 
     def run(self, host: str = "127.0.0.1", port: int = 8000, **kwargs) -> None:
         """Run the composed FastAPI application with uvicorn."""
         uvicorn.run(self.app, host=host, port=port, **kwargs)
-

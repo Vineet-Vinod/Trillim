@@ -25,6 +25,14 @@ class _Session:
         yield b"a"
         yield b"b"
 
+    async def __aenter__(self):
+        self.calls.append("session.__aenter__")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.calls.append("session.__aexit__")
+        return False
+
 
 class _EchoComponent(Component):
     def __init__(self, calls: list[str], name: str = "echo") -> None:
@@ -92,8 +100,12 @@ class RuntimeTests(unittest.TestCase):
             self.assertIsInstance(session, _RuntimeObjectProxy)
             self.assertEqual(session.ping(), "pong")
             self.assertEqual(list(session), [b"a", b"b"])
+            with runtime.echo.session() as managed:
+                self.assertEqual(managed.state, "ready")
         self.assertIn("echo.session", calls)
         self.assertIn("session.ping", calls)
+        self.assertIn("session.__aenter__", calls)
+        self.assertIn("session.__aexit__", calls)
 
     def test_runtime_stops_started_components_if_startup_fails(self):
         calls: list[str] = []
@@ -102,4 +114,3 @@ class RuntimeTests(unittest.TestCase):
             runtime.start()
         self.assertEqual(calls, ["one.start", "two.start", "one.stop"])
         self.assertFalse(runtime.started)
-
