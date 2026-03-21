@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,19 +58,41 @@ def validate_audio_bytes(audio_bytes: bytes) -> bytes:
 
 
 def validate_source_file(path: str | Path) -> Path:
-    """Validate a caller-owned source path before normalization."""
+    """Perform cheap preliminary validation on a caller-owned source path."""
     if not str(path):
         raise InvalidRequestError("path is required")
-    resolved = Path(path).expanduser()
-    if not resolved.exists():
-        raise InvalidRequestError(f"audio file does not exist: {resolved}")
-    if not resolved.is_file():
-        raise InvalidRequestError(f"audio file is not a regular file: {resolved}")
-    if resolved.stat().st_size > MAX_UPLOAD_BYTES:
-        raise PayloadTooLargeError(
-            f"audio input exceeds the {MAX_UPLOAD_BYTES} byte limit"
-        )
-    return resolved
+    return Path(path).expanduser()
+
+
+def open_validated_source_file(path: Path) -> int:
+    """Open a caller-owned source file and validate the opened descriptor."""
+    try:
+        path_stat = os.stat(path)
+    except FileNotFoundError as exc:
+        raise InvalidRequestError(f"audio file does not exist: {path}") from exc
+    except OSError as exc:
+        raise InvalidRequestError(f"audio file could not be opened: {path}") from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise InvalidRequestError(f"audio file is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise InvalidRequestError(f"audio file does not exist: {path}") from exc
+    except OSError as exc:
+        raise InvalidRequestError(f"audio file could not be opened: {path}") from exc
+    try:
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise InvalidRequestError(f"audio file is not a regular file: {path}")
+        if stat_result.st_size > MAX_UPLOAD_BYTES:
+            raise PayloadTooLargeError(
+                f"audio input exceeds the {MAX_UPLOAD_BYTES} byte limit"
+            )
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def validate_owned_audio_input(owned_audio: OwnedAudioInput) -> OwnedAudioInput:

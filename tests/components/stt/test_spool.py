@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from trillim.components.stt import _spool as stt_spool
 from trillim.components.stt._config import SourceFileSnapshot
 from trillim.components.stt._spool import (
-    _copy_source_file_sync,
     copy_source_file,
     spool_audio_bytes,
     spool_request_stream,
@@ -89,10 +89,7 @@ class STTSpoolTests(unittest.IsolatedAsyncioTestCase):
         source = Path(self._temp_dir.name) / "source.wav"
         source.write_bytes(b"abcdef")
         started = threading.Event()
-        original_read = __import__(
-            "trillim.components.stt._spool",
-            fromlist=["_read_source_chunk"],
-        )._read_source_chunk
+        original_read = stt_spool._read_source_chunk
 
         def slow_read(source_handle):
             chunk = original_read(source_handle)
@@ -112,8 +109,44 @@ class STTSpoolTests(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertEqual(list_spool_files(self.spool_dir), [])
 
-    async def test_copy_source_file_closes_raw_fd_when_source_open_races(self):
+    async def test_copy_source_file_rejects_missing_source_before_copy(self):
         missing = Path(self._temp_dir.name) / "missing.wav"
+        with self.assertRaisesRegex(InvalidRequestError, "does not exist"):
+            await copy_source_file(missing, spool_dir=self.spool_dir)
+        self.assertEqual(list_spool_files(self.spool_dir), [])
+
+    async def test_copy_source_file_uses_opened_descriptor_if_path_is_replaced(self):
+        source = Path(self._temp_dir.name) / "source.wav"
+        replacement = Path(self._temp_dir.name) / "replacement.wav"
+        source.write_bytes(b"original")
+        replacement.write_bytes(b"replacement")
+        entered = threading.Event()
+        proceed = threading.Event()
+        original_copy = stt_spool._copy_source_file_sync
+
+        def delayed_copy(source_fd: int, spool_dir: Path, cancel_event) -> object:
+            entered.set()
+            proceed.wait()
+            return original_copy(source_fd, spool_dir, cancel_event)
+
+        with patch(
+            "trillim.components.stt._spool._copy_source_file_sync",
+            side_effect=delayed_copy,
+        ):
+            task = asyncio.create_task(copy_source_file(source, spool_dir=self.spool_dir))
+            await asyncio.to_thread(entered.wait)
+            source.unlink()
+            replacement.replace(source)
+            proceed.set()
+            owned = await task
+
+        self.assertEqual(owned.path.read_bytes(), b"original")
+        owned.path.unlink()
+
+    async def test_copy_source_file_closes_source_fd_if_temp_creation_fails(self):
+        source = Path(self._temp_dir.name) / "source.wav"
+        source.write_bytes(b"original")
+        source_fd = stt_spool.open_validated_source_file(source)
         original_close = os.close
         closed_fds: list[int] = []
 
@@ -121,9 +154,16 @@ class STTSpoolTests(unittest.IsolatedAsyncioTestCase):
             closed_fds.append(fd)
             original_close(fd)
 
-        with patch("trillim.components.stt._spool.os.close", side_effect=tracked_close):
-            with self.assertRaises(FileNotFoundError):
-                _copy_source_file_sync(missing, self.spool_dir, None)
+        with patch(
+            "trillim.components.stt._spool._create_owned_temp_file",
+            side_effect=OSError("disk full"),
+        ), patch(
+            "trillim.components.stt._spool.os.close",
+            side_effect=tracked_close,
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                stt_spool._copy_source_file_sync(source_fd, self.spool_dir, None)
 
-        self.assertEqual(len(closed_fds), 1)
-        self.assertEqual(list_spool_files(self.spool_dir), [])
+        self.assertIn(source_fd, closed_fds)
+        with self.assertRaises(OSError):
+            os.fstat(source_fd)

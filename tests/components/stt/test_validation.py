@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import tempfile
+import os
+import stat
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from trillim.components.stt._config import OwnedAudioInput, SourceFileSnapshot
 from trillim.components.stt._validation import (
     PayloadTooLargeError,
+    open_validated_source_file,
     validate_audio_bytes,
     validate_http_request,
     validate_language,
@@ -40,7 +44,12 @@ class STTValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(PayloadTooLargeError, "byte limit"):
                 validate_audio_bytes(b"abcd")
 
-    def test_validate_source_file_rejects_missing_non_file_and_oversize_paths(self):
+    def test_validate_source_file_requires_a_path_and_normalizes_it(self):
+        with self.assertRaisesRegex(InvalidRequestError, "path is required"):
+            validate_source_file("")
+        self.assertEqual(validate_source_file("~/audio.wav"), Path("~/audio.wav").expanduser())
+
+    def test_open_validated_source_file_rejects_missing_non_file_and_oversize_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             missing = root / "missing.wav"
@@ -49,15 +58,63 @@ class STTValidationTests(unittest.TestCase):
             audio = root / "audio.wav"
             audio.write_bytes(b"abc")
             with self.assertRaisesRegex(InvalidRequestError, "does not exist"):
-                validate_source_file(missing)
+                open_validated_source_file(missing)
             with self.assertRaisesRegex(InvalidRequestError, "not a regular file"):
-                validate_source_file(directory)
+                open_validated_source_file(directory)
             with patch(
                 "trillim.components.stt._validation.MAX_UPLOAD_BYTES",
                 new=2,
             ):
                 with self.assertRaisesRegex(PayloadTooLargeError, "byte limit"):
-                    validate_source_file(audio)
+                    open_validated_source_file(audio)
+
+    def test_open_validated_source_file_returns_a_usable_fd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "audio.wav"
+            audio.write_bytes(b"abc")
+            fd = open_validated_source_file(audio)
+            try:
+                self.assertEqual(os.read(fd, 3), b"abc")
+            finally:
+                os.close(fd)
+
+    def test_open_validated_source_file_uses_binary_flag_when_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio = Path(temp_dir) / "audio.wav"
+            audio.write_bytes(b"abc")
+            original_open = os.open
+            captured_flags: list[int] = []
+
+            def tracked_open(path, flags, *args, **kwargs):
+                captured_flags.append(flags)
+                return original_open(path, flags, *args, **kwargs)
+
+            with patch.object(
+                __import__("trillim.components.stt._validation", fromlist=["os"]).os,
+                "O_BINARY",
+                0x8000,
+                create=True,
+            ), patch(
+                "trillim.components.stt._validation.os.open",
+                side_effect=tracked_open,
+            ):
+                fd = open_validated_source_file(audio)
+            try:
+                self.assertEqual(captured_flags, [os.O_RDONLY | 0x8000])
+            finally:
+                os.close(fd)
+
+    def test_open_validated_source_file_rejects_non_regular_targets_before_open(self):
+        fake_stat = SimpleNamespace(st_mode=stat.S_IFIFO, st_size=0)
+        with patch(
+            "trillim.components.stt._validation.os.stat",
+            return_value=fake_stat,
+        ), patch(
+            "trillim.components.stt._validation.os.open",
+            side_effect=AssertionError("os.open should not be called"),
+        ):
+            with self.assertRaisesRegex(InvalidRequestError, "not a regular file"):
+                open_validated_source_file(Path("/tmp/fifo"))
 
     def test_validate_owned_audio_input_rejects_empty_and_oversize_owned_copies(self):
         with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):

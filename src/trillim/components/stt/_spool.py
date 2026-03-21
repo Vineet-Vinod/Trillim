@@ -13,6 +13,7 @@ from trillim.components.stt._config import OwnedAudioInput
 from trillim.components.stt._limits import MAX_UPLOAD_BYTES, SPOOL_CHUNK_SIZE_BYTES
 from trillim.components.stt._validation import (
     PayloadTooLargeError,
+    open_validated_source_file,
     snapshot_source_file,
     validate_source_snapshot,
 )
@@ -70,11 +71,12 @@ async def copy_source_file(
     spool_dir: Path,
 ) -> OwnedAudioInput:
     """Normalize a caller-owned path into a Trillim-owned temp file."""
+    source_fd = open_validated_source_file(source_path)
     cancel_event = threading.Event()
     copy_task = asyncio.create_task(
         asyncio.to_thread(
             _copy_source_file_sync,
-            source_path,
+            source_fd,
             spool_dir,
             cancel_event,
         )
@@ -95,17 +97,21 @@ async def copy_source_file(
 
 
 def _copy_source_file_sync(
-    source_path: Path,
+    source_fd: int,
     spool_dir: Path,
     cancel_event: threading.Event | None = None,
 ) -> OwnedAudioInput:
-    fd, temp_path = _create_owned_temp_file(spool_dir)
-    raw_fd = fd
+    raw_source_fd = source_fd
+    raw_temp_fd = -1
+    temp_path: Path | None = None
     total = 0
     try:
-        with source_path.open("rb") as source_handle:
-            with os.fdopen(raw_fd, "wb") as temp_handle:
-                raw_fd = -1
+        temp_fd, temp_path = _create_owned_temp_file(spool_dir)
+        raw_temp_fd = temp_fd
+        with os.fdopen(raw_source_fd, "rb") as source_handle:
+            raw_source_fd = -1
+            with os.fdopen(raw_temp_fd, "wb") as temp_handle:
+                raw_temp_fd = -1
                 before = snapshot_source_file(os.fstat(source_handle.fileno()))
                 while True:
                     _raise_if_copy_cancelled(cancel_event)
@@ -123,9 +129,12 @@ def _copy_source_file_sync(
         validate_source_snapshot(before, after)
         return OwnedAudioInput(path=temp_path, size_bytes=total)
     except BaseException:
-        if raw_fd >= 0:
-            os.close(raw_fd)
-        unlink_if_exists(temp_path)
+        if raw_source_fd >= 0:
+            os.close(raw_source_fd)
+        if raw_temp_fd >= 0:
+            os.close(raw_temp_fd)
+        if temp_path is not None:
+            unlink_if_exists(temp_path)
         raise
 
 
