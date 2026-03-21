@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff==0.15.0"]
-voice = ["faster-whisper==1.2.1", "pocket-tts==1.0.3", "numpy==2.4.2", "python-multipart==0.0.22"]
+voice = ["faster-whisper==1.2.1", "pocket-tts==1.0.3", "numpy==2.4.2"]
 
 [project.scripts]
 trillim = "trillim.cli:main"

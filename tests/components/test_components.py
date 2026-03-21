@@ -2,6 +2,7 @@
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import APIRouter
 
@@ -10,6 +11,7 @@ from trillim.components.llm import LLM
 from trillim.components.stt import STT
 from trillim.components.tts import TTS
 from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model
+from tests.components.stt.support import make_faster_whisper_stub
 
 
 class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
@@ -25,8 +27,10 @@ class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(component.router(), APIRouter)
         await llm.start()
         await llm.stop()
-        await STT().start()
-        await STT().stop()
+        with patch.dict("sys.modules", {"faster_whisper": make_faster_whisper_stub()}):
+            stt = STT()
+            await stt.start()
+            await stt.stop()
         await TTS().start()
         await TTS().stop()
 

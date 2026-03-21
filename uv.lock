@@ -1900,7 +1900,6 @@ voice = [
     { name = "faster-whisper" },
     { name = "numpy" },
     { name = "pocket-tts" },
-    { name = "python-multipart" },
 ]
 
 [package.metadata]
@@ -1913,7 +1912,6 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'voice'", specifier = "==2.4.2" },
     { name = "pocket-tts", marker = "extra == 'voice'", specifier = "==1.0.3" },
     { name = "prompt-toolkit", specifier = "==3.0.52" },
-    { name = "python-multipart", marker = "extra == 'voice'", specifier = "==0.0.22" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.0" },
     { name = "trafilatura", specifier = "==2.0.0" },
     { name = "transformers", specifier = "==4.57.1" },
