@@ -64,9 +64,9 @@ class ServerTests(unittest.TestCase):
         server = Server(
             _RouteComponent(calls, "one"),
             _RouteComponent(calls, "two"),
-            allow_llm_hot_swap=True,
+            allow_hot_swap=True,
         )
-        self.assertTrue(server.allow_llm_hot_swap)
+        self.assertTrue(server.allow_hot_swap)
         with TestClient(server.app) as client:
             self.assertEqual(client.get("/healthz").json(), {"status": "ok"})
             self.assertEqual(client.get("/one").json(), {"name": "one"})
@@ -89,7 +89,7 @@ class ServerTests(unittest.TestCase):
         llm_component = _HotSwapAwareComponent(calls, "llm")
         other_component = _HotSwapAwareComponent(calls, "other")
 
-        server = Server(llm_component, other_component, allow_llm_hot_swap=True)
+        server = Server(llm_component, other_component, allow_hot_swap=True)
         _ = server.app
 
         self.assertTrue(llm_component.enabled)

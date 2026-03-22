@@ -63,6 +63,24 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(swap.search_provider, "BRAVE_SEARCH")
         self.assertEqual(swap.search_token_budget, 32)
 
+    def test_validate_swap_request_rejects_unknown_harness_name(self):
+        with self.assertRaisesRegex(InvalidRequestError, "Unknown harness"):
+            validate_swap_request(
+                {
+                    "model_dir": "/tmp/model",
+                    "harness_name": "bogus",
+                }
+            )
+
+    def test_validate_swap_request_rejects_unknown_search_provider(self):
+        with self.assertRaisesRegex(InvalidRequestError, "Unknown search provider"):
+            validate_swap_request(
+                {
+                    "model_dir": "/tmp/model",
+                    "search_provider": "bogus",
+                }
+            )
+
     def test_validate_messages_accepts_search_role(self):
         validated = validate_messages(
             [

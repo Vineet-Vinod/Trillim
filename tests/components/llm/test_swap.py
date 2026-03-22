@@ -83,6 +83,35 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm.state, LLMState.SERVER_ERROR)
         self.assertIsNone(llm.model_name)
 
+    async def test_swap_model_can_recover_from_server_error_with_a_valid_model(self):
+        models = [
+            make_runtime_model(Path("/tmp/model-one"), name="model-one"),
+            make_runtime_model(Path("/tmp/model-two"), name="model-two"),
+            make_runtime_model(Path("/tmp/model-three"), name="model-three"),
+        ]
+        model_iter = iter(models)
+        llm = LLM(
+            "models/one",
+            _model_validator=lambda _: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["one"]),
+        )
+        await llm.start()
+        llm._engine_factory = FakeEngineFactory(start_error=RuntimeError("boom"))
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            await llm.swap_model("models/two")
+
+        self.assertEqual(llm.state, LLMState.SERVER_ERROR)
+
+        llm._engine_factory = FakeEngineFactory(responses=["three"])
+        info = await llm.swap_model("models/three")
+
+        self.assertEqual(info.state, LLMState.RUNNING)
+        self.assertEqual(info.name, "model-three")
+        self.assertEqual(llm.model_name, "model-three")
+        await llm.stop()
+
     async def test_swap_model_updates_harness_provider_and_budget(self):
         models = [
             make_runtime_model(Path("/tmp/model-one"), name="model-one"),

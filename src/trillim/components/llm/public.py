@@ -29,7 +29,7 @@ from trillim.harnesses.search.provider import (
     resolve_search_token_budget,
     validate_harness_name,
 )
-from trillim.errors import AdmissionRejectedError
+from trillim.errors import AdmissionRejectedError, ComponentLifecycleError
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +235,8 @@ class LLM(Component):
         search_token_budget: int | None = None,
     ) -> ModelInfo:
         """Hot-swap to another model without restarting the server."""
+        if self._state not in {LLMState.RUNNING, LLMState.SERVER_ERROR}:
+            raise ComponentLifecycleError("LLM hot swap requires the component to be running")
         await swap_model(
             self,
             str(model_dir),

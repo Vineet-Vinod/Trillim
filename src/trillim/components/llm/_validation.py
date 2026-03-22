@@ -15,6 +15,7 @@ from trillim.components.llm._limits import (
     MAX_OUTPUT_TOKENS,
     TOTAL_MESSAGE_TEXT_LIMIT_BYTES,
 )
+from trillim.harnesses.search.provider import normalize_provider_name, validate_harness_name
 from trillim.errors import InvalidRequestError
 
 
@@ -103,7 +104,15 @@ def validate_chat_request(
 
 def validate_swap_request(payload: object) -> SwapModelRequestInput:
     """Validate a hot-swap request payload."""
-    return _validate_model(SwapModelRequestInput, payload)
+    request = _validate_model(SwapModelRequestInput, payload)
+    try:
+        if request.harness_name is not None:
+            validate_harness_name(request.harness_name)
+        if request.search_provider is not None:
+            normalize_provider_name(request.search_provider)
+    except ValueError as exc:
+        raise InvalidRequestError(str(exc)) from exc
+    return request
 
 
 def validate_sampling_options(**kwargs) -> SamplingOptions:

@@ -24,7 +24,7 @@ class LLMRouterTests(unittest.TestCase):
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=responses or ["ok"]),
         )
-        return Server(llm, allow_llm_hot_swap=allow_hot_swap)
+        return Server(llm, allow_hot_swap=allow_hot_swap)
 
     def test_models_route_reports_truthful_model(self):
         with TestClient(self._make_server().app) as client:
@@ -60,7 +60,7 @@ class LLMRouterTests(unittest.TestCase):
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["unused"]),
         )
-        server = Server(llm)
+        server = Server(llm, allow_hot_swap=True)
 
         async def collect_and_swap(*_args, **_kwargs):
             await llm.swap_model("models/next")
@@ -114,7 +114,7 @@ class LLMRouterTests(unittest.TestCase):
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["ok"]),
         )
-        server = Server(llm, allow_llm_hot_swap=True)
+        server = Server(llm, allow_hot_swap=True)
 
         with TestClient(server.app) as client:
             response = client.post(
@@ -131,6 +131,16 @@ class LLMRouterTests(unittest.TestCase):
         self.assertEqual(llm._configured_harness_name, "search")
         self.assertEqual(llm._configured_search_provider, "brave")
         self.assertEqual(llm._configured_search_token_budget, 2048)
+
+    def test_swap_route_rejects_unknown_harness_with_400(self):
+        with TestClient(self._make_server(allow_hot_swap=True).app) as client:
+            response = client.post(
+                "/v1/models/swap",
+                json={"model_dir": "models/next", "harness_name": "bogus"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unknown harness", response.json()["detail"])
 
     def test_chat_completions_reports_end_of_turn_usage_with_search_harness(self):
         llm = LLM(

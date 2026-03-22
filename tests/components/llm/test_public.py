@@ -12,8 +12,8 @@ from trillim.components.llm import ChatSession
 from trillim.components.llm._config import LLMState
 from trillim.components.llm._session import _ChatSession
 from trillim.components.llm.public import LLM
+from trillim.errors import AdmissionRejectedError, ComponentLifecycleError
 from trillim.harnesses.search._harness import _SearchHarness
-from trillim.errors import AdmissionRejectedError
 from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model
 
 
@@ -122,6 +122,18 @@ class PublicLLMTests(unittest.IsolatedAsyncioTestCase):
             llm.open_session([{"role": "user", "content": "hello"}])
 
         await llm.stop()
+
+    async def test_swap_model_requires_running_component(self):
+        llm = self._make_llm()
+
+        with self.assertRaisesRegex(ComponentLifecycleError, "requires the component to be running"):
+            await llm.swap_model("models/next")
+
+        await llm.start()
+        await llm.stop()
+
+        with self.assertRaisesRegex(ComponentLifecycleError, "requires the component to be running"):
+            await llm.swap_model("models/next")
 
     async def test_search_harness_binds_and_clamps_runtime_budget(self):
         llm = LLM(
