@@ -27,7 +27,7 @@ class SamplingOptions(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_k: int | None = Field(default=None, ge=1, le=200)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
-    repetition_penalty: float | None = Field(default=None, ge=0.0, le=2.0)
+    repetition_penalty: float | None = Field(default=None, gt=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, ge=1, le=MAX_OUTPUT_TOKENS)
 
     def to_kwargs(self) -> dict[str, float | int | None]:
