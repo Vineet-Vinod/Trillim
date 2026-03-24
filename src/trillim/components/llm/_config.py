@@ -69,6 +69,7 @@ class SamplingDefaults:
     top_k: int = 50
     top_p: float = 0.9
     repetition_penalty: float = 1.1
+    rep_penalty_lookback: int = 64
     max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
 
 
@@ -107,6 +108,10 @@ def load_sampling_defaults(model_dir: Path) -> SamplingDefaults:
         repetition_penalty=_float_or_default(
             payload.get("repetition_penalty"),
             defaults.repetition_penalty,
+        ),
+        rep_penalty_lookback=_int_or_default(
+            payload.get("rep_penalty_lookback"),
+            defaults.rep_penalty_lookback,
         ),
         max_tokens=max_tokens,
     )

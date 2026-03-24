@@ -192,6 +192,7 @@ class LLM(Component):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator:
         """Stream one assistant turn from a temporary chat session."""
@@ -201,6 +202,7 @@ class LLM(Component):
                 top_k=top_k,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
+                rep_penalty_lookback=rep_penalty_lookback,
                 max_tokens=max_tokens,
             ):
                 yield event
@@ -213,6 +215,7 @@ class LLM(Component):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> str:
         """Collect one assistant turn from a temporary chat session."""
@@ -222,6 +225,7 @@ class LLM(Component):
             top_k=top_k,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
+            rep_penalty_lookback=rep_penalty_lookback,
             max_tokens=max_tokens,
         )
         return text
@@ -257,6 +261,7 @@ class LLM(Component):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ):
         async with self.open_session(messages) as session:
@@ -267,6 +272,7 @@ class LLM(Component):
                 top_k=top_k,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
+                rep_penalty_lookback=rep_penalty_lookback,
                 max_tokens=max_tokens,
             ):
                 if hasattr(event, "usage"):

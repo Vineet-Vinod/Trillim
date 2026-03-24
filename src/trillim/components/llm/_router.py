@@ -61,6 +61,7 @@ def build_router(llm, *, allow_hot_swap: bool) -> APIRouter:
                 top_k=chat_request.top_k,
                 top_p=chat_request.top_p,
                 repetition_penalty=chat_request.repetition_penalty,
+                rep_penalty_lookback=chat_request.rep_penalty_lookback,
                 max_tokens=chat_request.max_tokens,
             )
         except Exception as exc:
@@ -142,6 +143,7 @@ async def _stream_chat_response(llm, request_model):
             top_k=request_model.top_k,
             top_p=request_model.top_p,
             repetition_penalty=request_model.repetition_penalty,
+            rep_penalty_lookback=request_model.rep_penalty_lookback,
             max_tokens=request_model.max_tokens,
         ):
             if isinstance(event, ChatTokenEvent):

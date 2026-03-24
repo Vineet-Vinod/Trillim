@@ -110,6 +110,7 @@ class ChatSession(abc.ABC):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> str:
         """Collect the next assistant turn as a single string."""
@@ -123,6 +124,7 @@ class ChatSession(abc.ABC):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Stream structured events for the next assistant turn."""
@@ -217,6 +219,7 @@ class _ChatSession(ChatSession):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> str:
         """Collect the next assistant turn as a single string."""
@@ -227,6 +230,7 @@ class _ChatSession(ChatSession):
             top_k=top_k,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
+            rep_penalty_lookback=rep_penalty_lookback,
             max_tokens=max_tokens,
         ):
             if isinstance(event, ChatTokenEvent):
@@ -247,6 +251,7 @@ class _ChatSession(ChatSession):
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Stream structured events for the next assistant turn."""
@@ -255,6 +260,7 @@ class _ChatSession(ChatSession):
             top_k=top_k,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
+            rep_penalty_lookback=rep_penalty_lookback,
             max_tokens=max_tokens,
         )
         self._ensure_turn_startable()

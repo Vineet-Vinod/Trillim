@@ -36,6 +36,7 @@ class LLMConfigTests(unittest.TestCase):
                         "top_k": 12,
                         "top_p": 0.5,
                         "repetition_penalty": 1.4,
+                        "rep_penalty_lookback": 128,
                         "max_new_tokens": 99,
                     }
                 ),
@@ -51,6 +52,20 @@ class LLMConfigTests(unittest.TestCase):
                 top_k=12,
                 top_p=0.5,
                 repetition_penalty=1.4,
+                rep_penalty_lookback=128,
                 max_tokens=99,
             ),
         )
+
+    def test_load_sampling_defaults_parses_rep_penalty_lookback_as_int(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "generation_config.json").write_text(
+                json.dumps({"rep_penalty_lookback": 128.0}),
+                encoding="utf-8",
+            )
+
+            defaults = load_sampling_defaults(root)
+
+        self.assertEqual(defaults.rep_penalty_lookback, 128)
+        self.assertIsInstance(defaults.rep_penalty_lookback, int)

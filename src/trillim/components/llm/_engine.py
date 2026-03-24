@@ -176,6 +176,7 @@ class InferenceEngine:
         top_k: int | None = None,
         top_p: float | None = None,
         repetition_penalty: float | None = None,
+        rep_penalty_lookback: int | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[int]:
         """Generate tokens from the worker and update prompt-cache state."""
@@ -196,6 +197,11 @@ class InferenceEngine:
                             self.defaults.repetition_penalty
                             if repetition_penalty is None
                             else repetition_penalty
+                        ),
+                        rep_penalty_lookback=(
+                            self.defaults.rep_penalty_lookback
+                            if rep_penalty_lookback is None
+                            else rep_penalty_lookback
                         ),
                         max_tokens=self.defaults.max_tokens if max_tokens is None else max_tokens,
                     )
@@ -345,6 +351,7 @@ def _build_request_block(
     top_k: int,
     top_p: float,
     repetition_penalty: float,
+    rep_penalty_lookback: int,
     max_tokens: int,
 ) -> str:
     pairs = [
@@ -354,6 +361,7 @@ def _build_request_block(
         f"top_k={top_k}",
         f"top_p={top_p}",
         f"repetition_penalty={repetition_penalty}",
+        f"rep_penalty_lookback={rep_penalty_lookback}",
         f"max_tokens={max_tokens}",
     ]
     return f"{len(pairs)}\n" + "".join(f"{pair}\n" for pair in pairs)

@@ -63,6 +63,13 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(swap.search_provider, "BRAVE_SEARCH")
         self.assertEqual(swap.search_token_budget, 32)
 
+    def test_validate_sampling_options_accepts_runtime_lookback_range(self):
+        sampling = validate_sampling_options(rep_penalty_lookback=0)
+        large_sampling = validate_sampling_options(rep_penalty_lookback=512)
+
+        self.assertEqual(sampling.rep_penalty_lookback, 0)
+        self.assertEqual(large_sampling.rep_penalty_lookback, 512)
+
     def test_validate_swap_request_rejects_unknown_harness_name(self):
         with self.assertRaisesRegex(InvalidRequestError, "Unknown harness"):
             validate_swap_request(
