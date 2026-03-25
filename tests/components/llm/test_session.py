@@ -8,9 +8,11 @@ from pathlib import Path
 import unittest
 
 from trillim import _model_store
-from trillim.components.llm import ChatDoneEvent, ChatTokenEvent
+from trillim.components.llm import ChatDoneEvent, ChatTokenEvent, ChatUsage
+from trillim.components.llm._engine import EngineCrashedError, EngineProgressTimeoutError
 from trillim.components.llm.public import LLM
 from trillim.errors import (
+    ContextOverflowError,
     InvalidRequestError,
     ProgressTimeoutError,
     SessionBusyError,
@@ -18,6 +20,7 @@ from trillim.errors import (
     SessionExhaustedError,
     SessionStaleError,
 )
+from trillim.harnesses.search.provider import SearchAuthenticationError
 from tests.components.llm.support import (
     crashed,
     FakeEngineFactory,
@@ -93,6 +96,7 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
             session.add_user("again")
         session._consumer_active = False
         session._active_task = None
+        session._terminated.set()
         await llm.stop()
 
     async def test_session_stales_after_swap_request(self):
@@ -176,6 +180,39 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session._terminated.is_set())
         await llm.stop()
 
+    async def test_reset_stream_consumer_sets_terminated_after_cleanup(self):
+        llm = self._make_llm()
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        cleanup_started = asyncio.Event()
+        cleanup_release = asyncio.Event()
+
+        class _EventStream:
+            async def aclose(self):
+                cleanup_started.set()
+                await cleanup_release.wait()
+
+        session._active_event_stream = _EventStream()
+        session._consumer_active = True
+        session._terminated.clear()
+        reset_task = asyncio.create_task(session._reset_stream_consumer())
+        session._active_task = reset_task
+        await cleanup_started.wait()
+        wait_task = asyncio.create_task(session._wait_for_termination())
+        await asyncio.sleep(0)
+        self.assertFalse(wait_task.done())
+        self.assertFalse(session._terminated.is_set())
+        self.assertTrue(session._consumer_active)
+        with self.assertRaisesRegex(SessionBusyError, "active consumer"):
+            session._prepare_stream_chat(max_tokens=8)
+
+        cleanup_release.set()
+        await reset_task
+        await wait_task
+
+        self.assertTrue(session._terminated.is_set())
+        await llm.stop()
+
     async def test_session_exhausts_after_kv_position_limit(self):
         llm = self._make_llm(responses=["ok"], kv_positions=[256 * 1024])
         await llm.start()
@@ -234,6 +271,262 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
             await invalid_session.chat(max_tokens=0)
         release.set()
         await task
+        await llm.stop()
+
+    async def test_session_context_overflow_during_atomic_start_resets_state(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        async def overflowing_stream_events(*_args, **_kwargs):
+            raise ContextOverflowError(10, 8)
+            if False:  # pragma: no cover
+                yield None
+
+        llm._harness.stream_events = overflowing_stream_events
+
+        with self.assertRaises(ContextOverflowError):
+            async for _event in session.stream_chat(max_tokens=8):
+                pass
+        self.assertEqual(session.state, "open")
+        self.assertTrue(session._terminated.is_set())
+        await llm.stop()
+
+    async def test_session_search_authentication_error_after_first_event_restores_state(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        seen = []
+
+        async def auth_failing_stream_events(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            raise SearchAuthenticationError("search auth failed")
+
+        llm._harness.stream_events = auth_failing_stream_events
+
+        with self.assertRaisesRegex(RuntimeError, "search auth failed"):
+            async for event in session.stream_chat(max_tokens=8):
+                seen.append(event)
+        self.assertEqual(seen, [ChatTokenEvent(text="a")])
+        self.assertEqual(session.state, "open")
+        self.assertTrue(session._terminated.is_set())
+        await llm.stop()
+
+    async def test_session_progress_timeout_after_first_event_recovers_public_error(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        seen = []
+
+        async def timeout_after_token(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            raise EngineProgressTimeoutError("boom")
+
+        llm._harness.stream_events = timeout_after_token
+
+        with self.assertRaisesRegex(ProgressTimeoutError, "boom"):
+            async for event in session.stream_chat(max_tokens=8):
+                seen.append(event)
+        self.assertEqual(seen, [ChatTokenEvent(text="a")])
+        self.assertEqual(llm.state.value, "running")
+        self.assertEqual(session.state, "stale")
+        self.assertTrue(session._terminated.is_set())
+        await llm.stop()
+
+    async def test_session_handles_empty_started_stream(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        async def empty_stream_events(*_args, **_kwargs):
+            if False:  # pragma: no cover
+                yield None
+
+        llm._harness.stream_events = empty_stream_events
+
+        events = [event async for event in session.stream_chat(max_tokens=8)]
+        self.assertEqual(len(events), 1)
+        self.assertIsInstance(events[0], ChatDoneEvent)
+        self.assertEqual(events[0].text, "")
+        self.assertEqual(session.state, "open")
+        await llm.stop()
+
+    async def test_session_generic_start_failure_marks_failed_and_cleans_up(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        async def failing_stream_events(*_args, **_kwargs):
+            raise RuntimeError("boom")
+            if False:  # pragma: no cover
+                yield None
+
+        llm._harness.stream_events = failing_stream_events
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            async for _event in session.stream_chat(max_tokens=8):
+                pass
+        self.assertEqual(session.state, "failed")
+        self.assertTrue(session._terminated.is_set())
+        await llm.stop()
+
+    async def test_session_cancel_during_started_stream_marks_session_closed(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        started = asyncio.Event()
+
+        async def hanging_after_token(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            started.set()
+            await asyncio.Event().wait()
+
+        llm._harness.stream_events = hanging_after_token
+
+        async def consume():
+            async for _event in session.stream_chat(max_tokens=8):
+                pass
+
+        task = asyncio.create_task(consume())
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(session.state, "closed")
+        self.assertTrue(session._terminated.is_set())
+        await llm.stop()
+
+    async def test_session_context_overflow_after_first_event_restores_state(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        seen = []
+
+        async def overflowing_after_token(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            raise ContextOverflowError(10, 8)
+
+        llm._harness.stream_events = overflowing_after_token
+
+        with self.assertRaises(ContextOverflowError):
+            async for event in session.stream_chat(max_tokens=8):
+                seen.append(event)
+        self.assertEqual(seen, [ChatTokenEvent(text="a")])
+        self.assertEqual(session.state, "open")
+        await llm.stop()
+
+    async def test_session_exhaustion_after_first_event_marks_exhausted(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        seen = []
+
+        async def exhausted_after_token(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            raise SessionExhaustedError("exhausted")
+
+        llm._harness.stream_events = exhausted_after_token
+
+        with self.assertRaisesRegex(SessionExhaustedError, "exhausted"):
+            async for event in session.stream_chat(max_tokens=8):
+                seen.append(event)
+        self.assertEqual(seen, [ChatTokenEvent(text="a")])
+        self.assertEqual(session.state, "exhausted")
+        await llm.stop()
+
+    async def test_session_engine_crash_after_first_event_marks_failed_and_recovers(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        seen = []
+
+        async def crashing_after_token(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            raise EngineCrashedError("boom")
+
+        llm._harness.stream_events = crashing_after_token
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            async for event in session.stream_chat(max_tokens=8):
+                seen.append(event)
+        self.assertEqual(seen, [ChatTokenEvent(text="a")])
+        self.assertEqual(llm.state.value, "running")
+        self.assertEqual(session.state, "stale")
+        await llm.stop()
+
+    async def test_session_generic_failure_after_first_event_marks_failed(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        seen = []
+
+        async def failing_after_token(*_args, **_kwargs):
+            yield ChatTokenEvent(text="a")
+            raise RuntimeError("boom")
+
+        llm._harness.stream_events = failing_after_token
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            async for event in session.stream_chat(max_tokens=8):
+                seen.append(event)
+        self.assertEqual(seen, [ChatTokenEvent(text="a")])
+        self.assertEqual(session.state, "failed")
+        await llm.stop()
+
+    async def test_stream_helpers_cover_passthrough_and_noop_failure_paths(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        done = ChatDoneEvent(text="done", usage=ChatUsage(1, 1, 2, 0))
+        self.assertEqual(session._accumulate_stream_text("prefix", done), "prefix")
+        session._mark_stream_cancelled()
+        self.assertEqual(session.state, "closed")
+        session._state = "closed"
+        session._mark_stream_failed(Exception)
+        self.assertEqual(session.state, "closed")
+        await llm.stop()
+
+    async def test_prepared_stream_rechecks_closed_session_before_start(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        sampling = session._prepare_stream_chat(max_tokens=8)
+
+        await session.close()
+
+        with self.assertRaisesRegex(SessionClosedError, "closed"):
+            async for _event in session._stream_chat_prepared(sampling):
+                pass
+        self.assertEqual(session.state, "closed")
+        await llm.stop()
+
+    async def test_prepared_stream_rechecks_stale_session_before_start(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        sampling = session._prepare_stream_chat(max_tokens=8)
+
+        session._mark_stale()
+
+        with self.assertRaisesRegex(SessionStaleError, "stale"):
+            async for _event in session._stream_chat_prepared(sampling):
+                pass
+        self.assertEqual(session.state, "stale")
+        await llm.stop()
+
+    async def test_prepared_stream_rechecks_owner_stopped_session_before_start(self):
+        llm = self._make_llm(responses=["ok"])
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+        sampling = session._prepare_stream_chat(max_tokens=8)
+
+        session._mark_owner_stopped()
+
+        with self.assertRaisesRegex(SessionClosedError, "owner has stopped"):
+            async for _event in session._stream_chat_prepared(sampling):
+                pass
+        self.assertEqual(session.state, "owner_stopped")
         await llm.stop()
 
     async def test_session_renders_search_messages_for_chat_templates(self):

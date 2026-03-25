@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from trillim.components.tts._limits import MAX_EMITTED_AUDIO_CHUNKS
@@ -142,6 +143,68 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         unblock.set()
         await asyncio.wait_for(active.collect(), timeout=1)
         await asyncio.wait_for(tts.stop(), timeout=1)
+
+    async def test_stale_reservation_cannot_start_a_session(self):
+        tts = await self._start_tts()
+        reservation = await tts._reserve_session_slot()
+        await tts._release_reserved_slot(reservation)
+        with self.assertRaisesRegex(AdmissionRejectedError, "reservation is no longer active"):
+            await tts._start_reserved_session(
+                reservation,
+                "hello world",
+                voice="alba",
+                speed=1.0,
+            )
+        followup = await tts.speak("hello again")
+        self.assertTrue(await asyncio.wait_for(followup.collect(), timeout=1))
+        await tts.stop()
+
+    async def test_reserved_slot_blocks_followup_requests(self):
+        tts = await self._start_tts()
+        reservation = await tts._reserve_session_slot()
+        with self.assertRaisesRegex(AdmissionRejectedError, "only one live session"):
+            await tts.speak("hello world")
+        await tts._release_reserved_slot(reservation)
+        await tts.stop()
+
+    async def test_failed_reserved_start_cleans_up_temporary_voice_copy(self):
+        tts = await self._start_tts()
+        reservation = await tts._reserve_session_slot()
+        await tts._release_reserved_slot(reservation)
+        cleanup_path = self.spool_dir / "voice.state"
+        cleanup_path.parent.mkdir(parents=True, exist_ok=True)
+        cleanup_path.write_bytes(b"voice")
+        resolved_voice = SimpleNamespace(
+            kind="custom",
+            reference="voice-ref",
+            cleanup_path=cleanup_path,
+        )
+
+        async def resolve_for_session(_voice: str, *, spool_dir: Path):
+            self.assertEqual(spool_dir, self.spool_dir)
+            return resolved_voice
+
+        with patch.object(
+            tts._voice_store,
+            "resolve_for_session",
+            side_effect=resolve_for_session,
+        ):
+            with self.assertRaisesRegex(AdmissionRejectedError, "reservation is no longer active"):
+                await tts._start_reserved_session(
+                    reservation,
+                    "hello world",
+                    voice="custom",
+                    speed=1.0,
+                )
+        self.assertFalse(cleanup_path.exists())
+        await tts.stop()
+
+    async def test_stop_clears_reserved_slot(self):
+        tts = await self._start_tts()
+        reservation = await tts._reserve_session_slot()
+        self.assertIs(tts._reserved_slot, reservation)
+        await tts.stop()
+        self.assertIsNone(tts._reserved_slot)
 
     async def test_second_request_is_rejected_while_paused(self):
         first_segment_started = asyncio.Event()

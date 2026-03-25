@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from trillim.components.tts._router import build_router
+from trillim.components.tts._router import _read_bounded_body, build_router
 from trillim.components.tts._router import _as_http_error
 from trillim.components.tts._validation import PayloadTooLargeError, validate_http_voice_upload_request
 from trillim.components.tts._worker import WorkerFailureError
@@ -85,6 +85,140 @@ class TTSRouterTests(unittest.IsolatedAsyncioTestCase):
                     headers={"voice": "alba"},
                 )
         self.assertEqual(response.status_code, 400)
+
+    async def test_audio_speech_releases_reservation_after_invalid_utf8(self):
+        tts, imports_patch, builtins_patch = make_started_tts()
+        tts._spool_dir = self.spool_dir
+        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+            await tts.start()
+        router = build_router(tts)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/v1/audio/speech")
+        request = FakeRequest(
+            headers={"content-length": "1", "voice": "alba"},
+            chunks=[b"\xff"],
+        )
+        with self.assertRaises(HTTPException) as context:
+            await endpoint(request)
+        self.assertEqual(context.exception.status_code, 400)
+        session = await tts.speak("hello world")
+        self.assertTrue(await asyncio.wait_for(session.collect(), timeout=1))
+        await tts.stop()
+
+    async def test_audio_speech_releases_reservation_after_oversized_body(self):
+        tts, imports_patch, builtins_patch = make_started_tts()
+        tts._spool_dir = self.spool_dir
+        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+            await tts.start()
+        router = build_router(tts)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/v1/audio/speech")
+        request = FakeRequest(
+            headers={"content-length": "4", "voice": "alba"},
+            chunks=[b"abcd"],
+        )
+        with patch("trillim.components.tts._router.MAX_HTTP_TEXT_BYTES", 3):
+            with self.assertRaises(HTTPException) as context:
+                await endpoint(request)
+        self.assertEqual(context.exception.status_code, 413)
+        session = await tts.speak("hello world")
+        self.assertTrue(await asyncio.wait_for(session.collect(), timeout=1))
+        await tts.stop()
+
+    async def test_audio_speech_upload_timeout_releases_reservation(self):
+        class _HangingRequest(FakeRequest):
+            async def stream(self):
+                self.stream_called = True
+                await asyncio.Event().wait()
+                if False:  # pragma: no cover
+                    yield b""
+
+        tts, imports_patch, builtins_patch = make_started_tts()
+        tts._spool_dir = self.spool_dir
+        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+            await tts.start()
+        router = build_router(tts)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/v1/audio/speech")
+        request = _HangingRequest(headers={"content-length": "1", "voice": "alba"})
+        with patch("trillim.components.tts._router.PROGRESS_TIMEOUT_SECONDS", 0.01), patch(
+            "trillim.components.tts._router.TOTAL_UPLOAD_TIMEOUT_SECONDS", 0.05
+        ):
+            with self.assertRaises(HTTPException) as context:
+                await endpoint(request)
+        self.assertEqual(context.exception.status_code, 504)
+        self.assertTrue(request.stream_called)
+        session = await tts.speak("hello world")
+        self.assertTrue(await asyncio.wait_for(session.collect(), timeout=1))
+        await tts.stop()
+
+    async def test_read_bounded_body_allows_slow_upload_with_progress(self):
+        class _SlowRequest(FakeRequest):
+            async def stream(self):
+                self.stream_called = True
+                for chunk in self._chunks:
+                    await asyncio.sleep(0.01)
+                    yield chunk
+
+        request = _SlowRequest(
+            headers={"content-length": "5", "voice": "alba"},
+            chunks=[b"he", b"llo"],
+        )
+        with patch("trillim.components.tts._router.PROGRESS_TIMEOUT_SECONDS", 0.02), patch(
+            "trillim.components.tts._router.TOTAL_UPLOAD_TIMEOUT_SECONDS", 0.05
+        ):
+            body = await _read_bounded_body(request, limit=10)
+        self.assertEqual(body, b"hello")
+        self.assertTrue(request.stream_called)
+
+    async def test_audio_speech_empty_chunks_do_not_reset_timeout(self):
+        class _HeartbeatRequest(FakeRequest):
+            async def stream(self):
+                self.stream_called = True
+                while True:
+                    await asyncio.sleep(0.005)
+                    yield b""
+
+        tts, imports_patch, builtins_patch = make_started_tts()
+        tts._spool_dir = self.spool_dir
+        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+            await tts.start()
+        router = build_router(tts)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/v1/audio/speech")
+        request = _HeartbeatRequest(headers={"content-length": "1", "voice": "alba"})
+        with patch("trillim.components.tts._router.PROGRESS_TIMEOUT_SECONDS", 0.02), patch(
+            "trillim.components.tts._router.TOTAL_UPLOAD_TIMEOUT_SECONDS", 0.05
+        ):
+            with self.assertRaises(HTTPException) as context:
+                await endpoint(request)
+        self.assertEqual(context.exception.status_code, 504)
+        self.assertTrue(request.stream_called)
+        session = await tts.speak("hello world")
+        self.assertTrue(await asyncio.wait_for(session.collect(), timeout=1))
+        await tts.stop()
+
+    async def test_audio_speech_total_upload_timeout_releases_reservation(self):
+        class _TricklingRequest(FakeRequest):
+            async def stream(self):
+                self.stream_called = True
+                while True:
+                    await asyncio.sleep(0.01)
+                    yield b"x"
+
+        tts, imports_patch, builtins_patch = make_started_tts()
+        tts._spool_dir = self.spool_dir
+        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+            await tts.start()
+        router = build_router(tts)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/v1/audio/speech")
+        request = _TricklingRequest(headers={"content-length": "1", "voice": "alba"})
+        with patch("trillim.components.tts._router.PROGRESS_TIMEOUT_SECONDS", 0.02), patch(
+            "trillim.components.tts._router.TOTAL_UPLOAD_TIMEOUT_SECONDS", 0.03
+        ):
+            with self.assertRaises(HTTPException) as context:
+                await endpoint(request)
+        self.assertEqual(context.exception.status_code, 504)
+        self.assertTrue(request.stream_called)
+        session = await tts.speak("hello world")
+        self.assertTrue(await asyncio.wait_for(session.collect(), timeout=1))
+        await tts.stop()
 
     async def test_audio_speech_rejects_busy_request_before_reading_body(self):
         started = asyncio.Event()

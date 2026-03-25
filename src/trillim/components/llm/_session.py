@@ -303,72 +303,94 @@ class _ChatSession(ChatSession):
         self,
         sampling: SamplingOptions,
     ) -> AsyncIterator[ChatEvent]:
+        first_event, full_text = await self._start_prepared_stream(sampling)
+        async for event in self._consume_started_stream(first_event, full_text):
+            yield event
+
+    async def _start_prepared_stream(
+        self,
+        sampling: SamplingOptions,
+    ) -> tuple[ChatEvent | None, str]:
+        self._ensure_turn_startable()
         await self._begin_consumer()
+        event_stream = self._llm._harness.stream_events(
+            self,
+            **sampling.to_kwargs(),
+        )
+        self._active_event_stream = event_stream
         try:
-            full_text = ""
-            event_stream = self._llm._harness.stream_events(
-                self,
-                **sampling.to_kwargs(),
-            )
-            self._active_event_stream = event_stream
-            async for event in event_stream:
-                if isinstance(event, ChatTokenEvent):
-                    full_text += event.text
-                elif isinstance(event, ChatFinalTextEvent):
-                    full_text = event.text
-                yield event
-            if self._state in {"closed", "owner_stopped"}:
-                return
-            self._cached_token_count = self._llm._engine.cached_token_count
-            if self._cached_token_count >= SESSION_TOKEN_LIMIT:
-                self._state = "exhausted"
-            elif self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "open"
-            yield ChatDoneEvent(
-                text=full_text,
-                usage=ChatUsage(
-                    prompt_tokens=self._llm._harness.prompt_tokens,
-                    completion_tokens=self._llm._harness.completion_tokens,
-                    total_tokens=(
-                        self._llm._harness.prompt_tokens
-                        + self._llm._harness.completion_tokens
-                    ),
-                    cached_tokens=self._llm._harness.cached_tokens,
-                ),
-            )
+            first_event = await anext(event_stream)
+            return first_event, self._accumulate_stream_text("", first_event)
+        except StopAsyncIteration:
+            return None, ""
         except asyncio.CancelledError:
-            if self._state not in {"closed", "owner_stopped"}:
-                self._state = "closed"
+            self._mark_stream_cancelled()
+            await self._reset_stream_consumer()
             raise
         except SearchAuthenticationError as exc:
-            if self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "open"
+            self._mark_stream_failed(SearchAuthenticationError)
+            await self._reset_stream_consumer()
             raise RuntimeError(str(exc)) from exc
         except ContextOverflowError:
-            if self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "open"
+            self._mark_stream_failed(ContextOverflowError)
+            await self._reset_stream_consumer()
             raise
         except SessionExhaustedError:
-            if self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "exhausted"
+            self._mark_stream_failed(SessionExhaustedError)
+            await self._reset_stream_consumer()
             raise
         except EngineProgressTimeoutError:
-            if self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "failed"
+            self._mark_stream_failed(EngineProgressTimeoutError)
+            await self._reset_stream_consumer()
             raise
         except (EngineCrashedError, EngineError):
-            if self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "failed"
+            self._mark_stream_failed(EngineError)
+            await self._reset_stream_consumer()
             raise
         except Exception:
-            if self._state not in {"closed", "owner_stopped"} and not self._stale:
-                self._state = "failed"
+            self._mark_stream_failed(Exception)
+            await self._reset_stream_consumer()
+            raise
+
+    async def _consume_started_stream(
+        self,
+        first_event: ChatEvent | None,
+        full_text: str,
+    ) -> AsyncIterator[ChatEvent]:
+        try:
+            if first_event is not None:
+                yield first_event
+            event_stream = self._active_event_stream
+            if event_stream is not None:
+                async for event in event_stream:
+                    full_text = self._accumulate_stream_text(full_text, event)
+                    yield event
+            if self._state in {"closed", "owner_stopped"}:
+                return
+            yield self._finish_stream_success(full_text)
+        except asyncio.CancelledError:
+            self._mark_stream_cancelled()
+            raise
+        except SearchAuthenticationError as exc:
+            self._mark_stream_failed(SearchAuthenticationError)
+            raise RuntimeError(str(exc)) from exc
+        except ContextOverflowError:
+            self._mark_stream_failed(ContextOverflowError)
+            raise
+        except SessionExhaustedError:
+            self._mark_stream_failed(SessionExhaustedError)
+            raise
+        except EngineProgressTimeoutError:
+            self._mark_stream_failed(EngineProgressTimeoutError)
+            raise
+        except (EngineCrashedError, EngineError):
+            self._mark_stream_failed(EngineError)
+            raise
+        except Exception:
+            self._mark_stream_failed(Exception)
             raise
         finally:
-            self._active_event_stream = None
-            self._consumer_active = False
-            self._active_task = None
-            self._terminated.set()
+            await self._reset_stream_consumer()
 
     def _append_message(self, role: str, content: str) -> None:
         self._ensure_mutable()
@@ -501,9 +523,61 @@ class _ChatSession(ChatSession):
 
     async def _wait_for_termination(self) -> None:
         task = self._active_task
-        if task is None or task is asyncio.current_task():
+        if task is asyncio.current_task():
             return
         await self._terminated.wait()
+
+    def _accumulate_stream_text(self, full_text: str, event: ChatEvent) -> str:
+        if isinstance(event, ChatTokenEvent):
+            return full_text + event.text
+        if isinstance(event, ChatFinalTextEvent):
+            return event.text
+        return full_text
+
+    def _finish_stream_success(self, full_text: str) -> ChatDoneEvent:
+        self._cached_token_count = self._llm._engine.cached_token_count
+        if self._cached_token_count >= SESSION_TOKEN_LIMIT:
+            self._state = "exhausted"
+        elif self._state not in {"closed", "owner_stopped"} and not self._stale:
+            self._state = "open"
+        return ChatDoneEvent(
+            text=full_text,
+            usage=ChatUsage(
+                prompt_tokens=self._llm._harness.prompt_tokens,
+                completion_tokens=self._llm._harness.completion_tokens,
+                total_tokens=(
+                    self._llm._harness.prompt_tokens
+                    + self._llm._harness.completion_tokens
+                ),
+                cached_tokens=self._llm._harness.cached_tokens,
+            ),
+        )
+
+    def _mark_stream_cancelled(self) -> None:
+        if self._state not in {"closed", "owner_stopped"}:
+            self._state = "closed"
+
+    def _mark_stream_failed(self, error_type: type[BaseException]) -> None:
+        if self._state in {"closed", "owner_stopped"} or self._stale:
+            return
+        if error_type in (SearchAuthenticationError, ContextOverflowError):
+            self._state = "open"
+            return
+        if error_type is SessionExhaustedError:
+            self._state = "exhausted"
+            return
+        self._state = "failed"
+
+    async def _reset_stream_consumer(self) -> None:
+        event_stream = self._active_event_stream
+        try:
+            if event_stream is not None:
+                await event_stream.aclose()
+        finally:
+            self._active_event_stream = None
+            self._consumer_active = False
+            self._active_task = None
+            self._terminated.set()
 
     def __del__(self):
         task = self._active_task

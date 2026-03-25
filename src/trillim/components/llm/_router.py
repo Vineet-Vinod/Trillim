@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 
+import anyio
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
@@ -45,6 +47,12 @@ class _ChatStreamResponse(Response):
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         session = None
         admission_lease = None
+        stream_error = None
+        precommit_error = None
+        client_disconnected = False
+        disconnect_cancel_requested = False
+        disconnect_recovery_needed = False
+        response_started = False
         try:
             try:
                 session = self._llm.open_session(_request_messages(self._request_model))
@@ -59,48 +67,162 @@ class _ChatStreamResponse(Response):
 
             response_id = _response_id()
             created = int(time.time())
-            try:
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": self.status_code,
-                        "headers": self.raw_headers,
-                    }
-                )
-                async with session:
-                    async for chunk in _stream_chat_response(
-                        self._llm,
-                        session,
-                        sampling=sampling,
-                        response_id=response_id,
-                        created=created,
-                    ):
-                        await send(
-                            {
-                                "type": "http.response.body",
-                                "body": chunk.encode("utf-8"),
-                                "more_body": True,
-                            }
+
+            async def cancel_for_disconnect(task_group) -> None:
+                nonlocal client_disconnected, disconnect_cancel_requested, disconnect_recovery_needed
+                if disconnect_cancel_requested:
+                    return
+                disconnect_cancel_requested = True
+                client_disconnected = True
+                active_task = None if session is None else getattr(session, "_active_task", None)
+                if active_task is not None and not active_task.done():
+                    disconnect_recovery_needed = True
+                try:
+                    if session is not None:
+                        await session.close()
+                finally:
+                    task_group.cancel_scope.cancel()
+
+            async def stream_response(task_group) -> None:
+                nonlocal client_disconnected, precommit_error, response_started, stream_error
+                try:
+                    async with session:
+                        first_event, full_text = await session._start_prepared_stream(sampling)
+                        stream = _stream_chat_response(
+                            self._llm,
+                            session,
+                            first_event=first_event,
+                            full_text=full_text,
+                            response_id=response_id,
+                            created=created,
                         )
-                await send(
-                    {
-                        "type": "http.response.body",
-                        "body": b"",
-                        "more_body": False,
-                    }
-                )
-            except EngineProgressTimeoutError as exc:
+                        # Give the disconnect listener a chance to consume any
+                        # already-queued disconnect before committing headers.
+                        await anyio.lowlevel.checkpoint()
+                        if client_disconnected:
+                            return
+                        try:
+                            await send(
+                                {
+                                    "type": "http.response.start",
+                                    "status": self.status_code,
+                                    "headers": self.raw_headers,
+                                }
+                            )
+                            response_started = True
+                        except OSError:
+                            task_group.start_soon(cancel_for_disconnect, task_group)
+                            await anyio.lowlevel.checkpoint()
+                            return
+                        async for chunk in stream:
+                            if client_disconnected:
+                                return
+                            try:
+                                await send(
+                                    {
+                                        "type": "http.response.body",
+                                        "body": chunk.encode("utf-8"),
+                                        "more_body": True,
+                                    }
+                                )
+                            except OSError:
+                                task_group.start_soon(cancel_for_disconnect, task_group)
+                                await anyio.lowlevel.checkpoint()
+                                return
+                        if client_disconnected:
+                            return
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": b"",
+                            "more_body": False,
+                        }
+                    )
+                except (EngineProgressTimeoutError, EngineCrashedError, EngineError) as exc:
+                    if response_started:
+                        stream_error = exc
+                    else:
+                        precommit_error = exc
+                except SessionClosedError as exc:
+                    if client_disconnected:
+                        return
+                    if response_started:
+                        raise
+                    precommit_error = exc
+                except (ContextOverflowError, SessionExhaustedError, SessionStaleError) as exc:
+                    if response_started:
+                        raise
+                    precommit_error = exc
+                except OSError:
+                    return
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    if response_started:
+                        raise
+                    precommit_error = exc
+                finally:
+                    if not disconnect_cancel_requested:
+                        task_group.cancel_scope.cancel()
+
+            async def listen_for_disconnect(task_group) -> None:
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        await cancel_for_disconnect(task_group)
+                        return
+
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(stream_response, task_group)
+                task_group.start_soon(listen_for_disconnect, task_group)
+
+            if disconnect_recovery_needed:
                 await admission_lease.release()
                 admission_lease = None
                 await self._llm._recover_from_engine_failure()
-                raise ProgressTimeoutError(str(exc)) from exc
-            except (EngineCrashedError, EngineError) as exc:
-                await admission_lease.release()
-                admission_lease = None
-                await self._llm._recover_from_engine_failure()
-                raise RuntimeError(str(exc)) from exc
-            except OSError:
                 return
+
+            if precommit_error is not None:
+                if isinstance(precommit_error, EngineProgressTimeoutError):
+                    exc = precommit_error
+                    await admission_lease.release()
+                    admission_lease = None
+                    await self._llm._recover_from_engine_failure()
+                    precommit_error = ProgressTimeoutError(str(exc))
+                elif isinstance(precommit_error, (EngineCrashedError, EngineError)):
+                    exc = precommit_error
+                    await admission_lease.release()
+                    admission_lease = None
+                    await self._llm._recover_from_engine_failure()
+                    precommit_error = RuntimeError(str(exc))
+                if client_disconnected:
+                    return
+                try:
+                    await _http_exception_response(_as_http_error(precommit_error))(
+                        scope,
+                        receive,
+                        send,
+                    )
+                except OSError:
+                    pass
+                return
+
+            if isinstance(stream_error, EngineProgressTimeoutError):
+                exc = stream_error
+                await admission_lease.release()
+                admission_lease = None
+                await self._llm._recover_from_engine_failure()
+                if client_disconnected:
+                    return
+                raise ProgressTimeoutError(str(exc)) from exc
+            if isinstance(stream_error, (EngineCrashedError, EngineError)):
+                exc = stream_error
+                await admission_lease.release()
+                admission_lease = None
+                await self._llm._recover_from_engine_failure()
+                if client_disconnected:
+                    return
+                raise RuntimeError(str(exc)) from exc
         finally:
             if admission_lease is not None:
                 await admission_lease.release()
@@ -194,7 +316,15 @@ def build_router(llm, *, allow_hot_swap: bool) -> APIRouter:
     return router
 
 
-async def _stream_chat_response(llm, session, *, sampling, response_id: str, created: int):
+async def _stream_chat_response(
+    llm,
+    session,
+    *,
+    first_event,
+    full_text: str,
+    response_id: str,
+    created: int,
+):
     yield _sse(
         {
             "id": response_id,
@@ -210,7 +340,7 @@ async def _stream_chat_response(llm, session, *, sampling, response_id: str, cre
             ],
         }
     )
-    async for event in session._stream_chat_prepared(sampling):
+    async for event in session._consume_started_stream(first_event, full_text):
         if isinstance(event, ChatTokenEvent):
             if not event.text:
                 continue

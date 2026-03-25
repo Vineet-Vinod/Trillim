@@ -291,29 +291,35 @@ class ServeE2ETests(unittest.TestCase):
                 {"messages": [{"role": "user", "content": "slow request"}]},
             )
 
-            rejected = None
-            deadline = time.monotonic() + 2.0
             stream_body = json.dumps(
                 {
                     "messages": [{"role": "user", "content": "stream please"}],
                     "stream": True,
                 }
             ).encode("utf-8")
+            busy_confirmed = False
+            deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
                 if slow_future.done():
                     break
-                status, body, _headers = server.request(
+                status, _body, _headers = server.json_request(
                     "/v1/chat/completions",
-                    method="POST",
-                    body=stream_body,
-                    headers={"content-type": "application/json"},
+                    {"messages": [{"role": "user", "content": "probe request"}]},
                 )
                 if status == 429:
-                    rejected = json.loads(body)
+                    busy_confirmed = True
                     break
                 time.sleep(0.05)
 
-            self.assertIsNotNone(rejected)
+            self.assertTrue(busy_confirmed)
+            status, body, _headers = server.request(
+                "/v1/chat/completions",
+                method="POST",
+                body=stream_body,
+                headers={"content-type": "application/json"},
+            )
+            self.assertEqual(status, 429)
+            rejected = json.loads(body)
             self.assertIn("busy", rejected["detail"])
 
             slow_status, slow_body, _headers = slow_future.result(timeout=5.0)

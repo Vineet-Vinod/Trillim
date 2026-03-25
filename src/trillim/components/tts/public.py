@@ -82,6 +82,7 @@ class TTS(Component):
         self._voice_store: VoiceStore | None = None
         self._spool_dir = Path(tempfile.gettempdir()) / "trillim-tts"
         self._active_session: _TTSSession | None = None
+        self._reserved_slot: object | None = None
 
     @property
     def default_voice(self) -> str:
@@ -123,6 +124,7 @@ class TTS(Component):
         active_task: asyncio.Task | None = None
         async with self._scheduler_lock:
             self._accepting = False
+            self._reserved_slot = None
             active_session = self._active_session
             self._active_session = None
             if active_session is not None:
@@ -190,36 +192,19 @@ class TTS(Component):
         )
         assert resolved_voice_name is not None
         resolved_speed = self._default_speed if speed is None else validate_speed(speed)
-        resolved_voice = await self._require_voice_store().resolve_for_session(
-            resolved_voice_name,
-            spool_dir=self._spool_dir,
-        )
-        session_worker = self._session_worker_factory(
-            voice_kind=resolved_voice.kind,
-            voice_reference=resolved_voice.reference,
-        )
-        session = _create_tts_session(
-            self,
-            text=normalized_text,
-            voice=resolved_voice_name,
-            voice_kind=resolved_voice.kind,
-            voice_reference=resolved_voice.reference,
-            speed=resolved_speed,
-            cleanup_path=resolved_voice.cleanup_path,
-            session_worker=session_worker,
-        )
-        accepted = False
+        reservation = await self._reserve_session_slot()
         try:
-            async with self._scheduler_lock:
-                self._check_can_accept_locked()
-                self._start_session_locked(session)
-                accepted = True
-                return session
+            session = await self._start_reserved_session(
+                reservation,
+                normalized_text,
+                voice=resolved_voice_name,
+                speed=resolved_speed,
+            )
+            reservation = None
+            return session
         finally:
-            if not accepted and resolved_voice.cleanup_path is not None:
-                resolved_voice.cleanup_path.unlink(missing_ok=True)
-            if not accepted:
-                await session_worker.close()
+            if reservation is not None:
+                await self._release_reserved_slot(reservation)
 
     async def synthesize_wav(
         self,
@@ -289,9 +274,63 @@ class TTS(Component):
                 return
             session._speed = speed
 
-    async def _reject_if_busy(self) -> None:
+    async def _reserve_session_slot(self) -> object:
+        self._require_started()
         async with self._scheduler_lock:
             self._check_can_accept_locked()
+            token = object()
+            self._reserved_slot = token
+            return token
+
+    async def _release_reserved_slot(self, token: object) -> None:
+        async with self._scheduler_lock:
+            if self._reserved_slot is token:
+                self._reserved_slot = None
+
+    async def _start_reserved_session(
+        self,
+        token: object,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+    ) -> TTSSession:
+        self._require_started()
+        resolved_voice = await self._require_voice_store().resolve_for_session(
+            voice,
+            spool_dir=self._spool_dir,
+        )
+        session_worker = self._session_worker_factory(
+            voice_kind=resolved_voice.kind,
+            voice_reference=resolved_voice.reference,
+        )
+        session = _create_tts_session(
+            self,
+            text=text,
+            voice=voice,
+            voice_kind=resolved_voice.kind,
+            voice_reference=resolved_voice.reference,
+            speed=speed,
+            cleanup_path=resolved_voice.cleanup_path,
+            session_worker=session_worker,
+        )
+        started = False
+        try:
+            async with self._scheduler_lock:
+                if self._reserved_slot is not token:
+                    self._check_can_accept_locked()
+                    raise AdmissionRejectedError(
+                        "TTS reservation is no longer active; request cannot start"
+                    )
+                self._reserved_slot = None
+                self._start_session_locked(session)
+                started = True
+            return session
+        finally:
+            if not started:
+                if resolved_voice.cleanup_path is not None:
+                    resolved_voice.cleanup_path.unlink(missing_ok=True)
+                await session_worker.close()
 
     async def _register_voice_http_request(self, request) -> str:
         """Handle the raw-body HTTP voice-upload request."""
@@ -419,6 +458,8 @@ class TTS(Component):
     def _check_can_accept_locked(self) -> None:
         if not self._accepting:
             raise AdmissionRejectedError("TTS is draining and not accepting new requests")
+        if self._reserved_slot is not None:
+            raise AdmissionRejectedError("TTS is busy; only one live session is allowed")
         if self._active_session is not None:
             raise AdmissionRejectedError("TTS is busy; only one live session is allowed")
 

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from trillim.components.tts._limits import MAX_HTTP_TEXT_BYTES
+from trillim.components.tts._limits import (
+    MAX_HTTP_TEXT_BYTES,
+    PROGRESS_TIMEOUT_SECONDS,
+    TOTAL_UPLOAD_TIMEOUT_SECONDS,
+)
 from trillim.components.tts._validation import (
     PayloadTooLargeError,
     validate_http_speech_body,
@@ -51,6 +56,7 @@ def build_router(tts) -> APIRouter:
 
     @router.post("/v1/audio/speech")
     async def audio_speech(request: Request):
+        reservation = None
         try:
             speech_request = validate_http_speech_request(
                 content_length=request.headers.get("content-length"),
@@ -58,16 +64,21 @@ def build_router(tts) -> APIRouter:
                 speed=request.headers.get("speed"),
                 default_speed=tts.speed,
             )
-            await tts._reject_if_busy()
+            reservation = await tts._reserve_session_slot()
             body = await _read_bounded_body(request, MAX_HTTP_TEXT_BYTES)
             text = validate_http_speech_body(body)
-            session = await tts.speak(
+            session = await tts._start_reserved_session(
+                reservation,
                 text,
-                voice=speech_request.voice,
+                voice=tts.default_voice if speech_request.voice is None else speech_request.voice,
                 speed=speech_request.speed,
             )
+            reservation = None
         except Exception as exc:
             raise _as_http_error(exc) from exc
+        finally:
+            if reservation is not None:
+                await tts._release_reserved_slot(reservation)
         return StreamingResponse(
             _stream_speech_session(session),
             media_type="text/event-stream",
@@ -79,9 +90,25 @@ def build_router(tts) -> APIRouter:
 async def _read_bounded_body(request: Request, limit: int) -> bytes:
     total = 0
     chunks: list[bytes] = []
-    async for chunk in request.stream():
+    stream = request.stream().__aiter__()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + PROGRESS_TIMEOUT_SECONDS
+    while True:
+        now = loop.time()
+        remaining = min(deadline - now, started + TOTAL_UPLOAD_TIMEOUT_SECONDS - now)
+        if remaining <= 0:
+            raise ProgressTimeoutError("speech input upload timed out")
+        try:
+            async with asyncio.timeout(remaining):
+                chunk = await anext(stream)
+        except StopAsyncIteration:
+            break
+        except TimeoutError as exc:
+            raise ProgressTimeoutError("speech input upload timed out") from exc
         if not chunk:
             continue
+        deadline = loop.time() + PROGRESS_TIMEOUT_SECONDS
         total += len(chunk)
         if total > limit:
             raise PayloadTooLargeError(f"speech input exceeds the {limit} byte limit")
