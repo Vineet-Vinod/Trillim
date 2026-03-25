@@ -75,6 +75,13 @@ numpy
 
 --------------------------------------------------------------------------------
 
+soundfile
+  License:   BSD 3-Clause License
+  Copyright: Copyright (c) 2013, Bastian Bechtold
+  URL:       https://github.com/bastibe/python-soundfile
+
+--------------------------------------------------------------------------------
+
 python-multipart
   License:   Apache License 2.0
   Copyright: Copyright 2012, Andrew Dunham
