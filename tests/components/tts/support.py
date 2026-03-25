@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,12 +149,6 @@ def write_fake_pocket_tts_package(root: Path) -> None:
         "PREDEFINED_VOICES = {'alba': 'x', 'marius': 'y'}\n",
         encoding="utf-8",
     )
-
-
-def write_json(path: Path, payload: object) -> None:
-    """Write one JSON file with UTF-8 encoding."""
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
 
 def prepend_pythonpath(path: Path) -> dict[str, str]:
     """Return an environment patch with one extra ``PYTHONPATH`` entry."""

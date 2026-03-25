@@ -32,7 +32,7 @@ class _WorkerStreamTooLargeError(RuntimeError):
 
 _RESPONSE_HEADER = struct.Struct(">cI")
 _REQUEST_HEADER = struct.Struct(">I")
-_VOICE_CLONE_AUTH_ERROR = """ValueError: We could not download the weights for the model with voice cloning, but you're trying to use voice cloning. Without voice cloning, you can use our catalog of voices ['alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma']. If you want access to the model with voice cloning, go to https://huggingface.co/kyutai/pocket-tts and accept the terms, then make sure you're logged in locally with `uvx hf auth login`"""
+_VOICE_CLONE_AUTH_ERROR = """ValueError: We could not download the weights for the model with voice cloning, but you're trying to use voice cloning. Without voice cloning, you can use our catalog of voices ['alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma']. If you want access to the model with voice cloning, go to https://huggingface.co/kyutai/pocket-tts and accept the terms, then make sure you're logged in locally with `uvx hf auth login`""".lower()
 
 
 def create_session_worker(*, voice_kind: str, voice_reference: str) -> _PersistentSessionWorker:

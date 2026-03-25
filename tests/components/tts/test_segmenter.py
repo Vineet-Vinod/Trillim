@@ -30,7 +30,7 @@ class TTSSegmenterTests(unittest.TestCase):
     def test_iter_text_segments_replaces_too_long_non_whitespace_tokens(self):
         word = "x" * (HARD_TEXT_SEGMENT_CAP + 10)
         segments = list(iter_text_segments(f"alpha {word} omega", self.tokenizer))
-        self.assertEqual(segments, ["alpha too-long-1word-skipped omega"])
+        self.assertEqual(segments, ["alpha too-long-word-skipped omega"])
         self.assertTrue(all("x" * 51 not in segment for segment in segments))
         self.assertTrue(
             all(count_tts_tokens(segment, self.tokenizer) <= TARGET_TTS_TOKENS for segment in segments)

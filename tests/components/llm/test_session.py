@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 from pathlib import Path
 import unittest
 
+from trillim import _model_store
 from trillim.components.llm import ChatDoneEvent, ChatTokenEvent
 from trillim.components.llm.public import LLM
 from trillim.errors import (
@@ -19,6 +21,7 @@ from tests.components.llm.support import (
     FakeEngineFactory,
     FakeTokenizer,
     make_runtime_model,
+    patched_model_store,
     progress_timeout,
 )
 
@@ -47,9 +50,16 @@ class _StrictTemplateTokenizer(FakeTokenizer):
 
 
 class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(patched_model_store())
+        _model_store.store_path_for_id("Trillim/fake").mkdir(parents=True, exist_ok=True)
+        _model_store.store_path_for_id("Trillim/other").mkdir(parents=True, exist_ok=True)
+
     def _make_llm(self, *, responses=None, kv_positions=None, failure=None):
         return LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(
@@ -88,7 +98,7 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
         await llm.start()
         session = llm.open_session([{"role": "user", "content": "hello"}])
 
-        await llm.swap_model("models/other")
+        await llm.swap_model("Trillim/other")
 
         with self.assertRaisesRegex(SessionStaleError, "stale"):
             session.add_user("again")
@@ -188,7 +198,7 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_renders_search_messages_for_chat_templates(self):
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
             _tokenizer_loader=lambda *_args, **_kwargs: _StrictTemplateTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["ok"]),

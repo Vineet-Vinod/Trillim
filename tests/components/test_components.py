@@ -1,23 +1,36 @@
 """Tests for skeletal component packages."""
 
+from contextlib import ExitStack
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import APIRouter
 
+from trillim import _model_store
 from trillim.components import Component
 from trillim.components.llm import LLM
 from trillim.components.stt import STT
 from trillim.components.tts import TTS
-from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model
+from tests.components.llm.support import (
+    FakeEngineFactory,
+    FakeTokenizer,
+    make_runtime_model,
+    patched_model_store,
+)
 from tests.components.stt.support import make_faster_whisper_stub
 
 
 class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(patched_model_store())
+        _model_store.store_path_for_id("Trillim/fake").mkdir(parents=True, exist_ok=True)
+
     async def test_component_packages_are_valid_components(self):
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["ok"]),
@@ -36,7 +49,7 @@ class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_component_names_match_expected_runtime_names(self):
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["ok"]),

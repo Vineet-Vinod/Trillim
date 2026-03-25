@@ -17,7 +17,7 @@ from trillim.components.llm._model_dir import (
     validate_model_dir,
 )
 from trillim.errors import ModelValidationError
-from tests.components.llm.support import model_dir
+from tests.components.llm.support import model_dir, write_adapter_bundle
 
 
 class ModelDirectoryTests(unittest.TestCase):
@@ -150,6 +150,64 @@ class ModelDirectoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ModelValidationError, "must not use symlinks"):
                 validate_lora_dir(adapter)
 
+    def test_validate_lora_dir_requires_trillim_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapter = Path(temp_dir) / "adapter"
+            adapter.mkdir()
+            (adapter / "qmodel.lora").write_bytes(b"adapter")
+
+            with self.assertRaisesRegex(ModelValidationError, "trillim_config.json not found"):
+                validate_lora_dir(adapter)
+
+    def test_validate_lora_dir_requires_supported_compatibility_metadata(self):
+        with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
+            adapter = Path(temp_dir) / "adapter"
+            adapter.mkdir()
+            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            (adapter / "trillim_config.json").write_text(
+                json.dumps({"format_version": 3}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ModelValidationError, "missing or unsupported"):
+                validate_lora_dir(adapter)
+            with self.assertRaisesRegex(ModelValidationError, "missing or unsupported"):
+                validate_lora_dir(adapter, model_dir=root)
+
+    def test_validate_lora_dir_rejects_non_object_trillim_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapter = Path(temp_dir) / "adapter"
+            adapter.mkdir()
+            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            (adapter / "trillim_config.json").write_text(
+                "[]",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ModelValidationError, "must be a JSON object"):
+                validate_lora_dir(adapter)
+
+    def test_validate_lora_dir_rejects_incompatible_base_model(self):
+        with model_dir() as root, model_dir(extra_config={"vocab_size": 1024}) as other_root, tempfile.TemporaryDirectory() as temp_dir:
+            adapter = Path(temp_dir) / "adapter"
+            write_adapter_bundle(adapter, model_root=other_root)
+
+            with self.assertRaisesRegex(ModelValidationError, "Adapter/model mismatch"):
+                validate_lora_dir(adapter, model_dir=root)
+
+    def test_validate_lora_dir_accepts_equivalent_defaulted_kv_head_configs(self):
+        with model_dir() as explicit_root, model_dir() as defaulted_root, tempfile.TemporaryDirectory() as temp_dir:
+            config_path = defaulted_root / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.pop("num_key_value_heads")
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            adapter = Path(temp_dir) / "adapter"
+            write_adapter_bundle(adapter, model_root=defaulted_root)
+
+            resolved = validate_lora_dir(adapter, model_dir=explicit_root)
+
+        self.assertEqual(resolved, adapter)
+
     def test_prepare_runtime_files_merges_lora_metadata_and_prefers_adapter_truth(self):
         with model_dir(
             extra_config={
@@ -158,8 +216,7 @@ class ModelDirectoryTests(unittest.TestCase):
             }
         ) as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "vocab.txt").write_text("base-vocab\n", encoding="utf-8")
             (root / "merges.txt").write_text("base-merges\n", encoding="utf-8")
             (root / "model.safetensors").write_bytes(b"unused")
@@ -270,8 +327,7 @@ class ModelDirectoryTests(unittest.TestCase):
             },
         ) as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (adapter / "config.json").write_text(
                 json.dumps(
                     {
@@ -319,8 +375,7 @@ class ModelDirectoryTests(unittest.TestCase):
             }
         ) as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (adapter / "config.json").write_text(
                 json.dumps(
                     {
@@ -362,8 +417,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_merges_partial_tokenizer_config_with_base_fallback(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -404,8 +458,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_ignores_unused_symlinked_extra_files(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             base_target = root / "extra-real.txt"
             base_target.write_text("base-extra", encoding="utf-8")
             (root / "extra-link.txt").symlink_to(base_target)
@@ -430,8 +483,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_symlinked_base_config_when_adapter_enabled(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             real_config = root / "config-real.json"
             real_config.write_text((root / "config.json").read_text(encoding="utf-8"), encoding="utf-8")
             (root / "config.json").unlink()
@@ -446,8 +498,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_symlinked_runtime_used_tokenizer_file(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             target = root / "tokenizer-real.json"
             target.write_text((root / "tokenizer.json").read_text(encoding="utf-8"), encoding="utf-8")
             (root / "tokenizer.json").unlink()
@@ -462,8 +513,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_fails_fast_when_runtime_artifacts_cannot_be_hardlinked(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
 
             with patch("trillim.components.llm._model_dir.os.link", side_effect=OSError(errno.EXDEV, "cross-device")):
                 with self.assertRaisesRegex(ModelValidationError, "across filesystems"):
@@ -475,8 +525,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_multi_filesystem_lora_overlays(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
 
             def fake_device(path: Path) -> int:
                 return 1 if path in (root, adapter) else 2
@@ -491,8 +540,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_copies_remote_code_with_adapter_override(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -535,8 +583,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_collects_eos_tokens_from_added_tokens_overlay(self):
         with model_dir(tokenizer_payload={"model": "base"}) as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "added_tokens.json").write_text(
                 json.dumps({"<|eot_id|>": 11}),
                 encoding="utf-8",
@@ -567,8 +614,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_external_remote_code_references(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -589,8 +635,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_package_scoped_auto_map_entry_points(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -611,8 +656,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_parent_relative_remote_code_imports(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -637,8 +681,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_package_scoped_remote_code_imports(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -666,8 +709,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_remote_code_file_budget_overflow(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -694,8 +736,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_remote_code_depth_overflow(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {
@@ -722,8 +763,7 @@ class ModelDirectoryTests(unittest.TestCase):
     def test_prepare_runtime_files_rejects_remote_code_byte_budget_overflow(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
             adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
+            write_adapter_bundle(adapter, model_root=root)
             (root / "tokenizer_config.json").write_text(
                 json.dumps(
                     {

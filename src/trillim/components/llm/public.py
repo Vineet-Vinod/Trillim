@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
+from trillim import _model_store
 from trillim.components import Component
 from trillim.components.llm._admission import GenerationAdmission
 from trillim.components.llm._config import (
@@ -39,7 +40,7 @@ from trillim.harnesses.search.provider import (
     resolve_search_token_budget,
     validate_harness_name,
 )
-from trillim.errors import AdmissionRejectedError, ComponentLifecycleError
+from trillim.errors import AdmissionRejectedError, ComponentLifecycleError, InvalidRequestError
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,21 +533,31 @@ def _make_init_config(
     if num_threads < 0 or num_threads > MAX_THREADS:
         raise ValueError(f"num_threads must be between 0 and {MAX_THREADS}")
     return InitConfig(
-        model_dir=Path(model_dir),
+        model_dir=_normalize_store_id("model_dir", model_dir),
         num_threads=num_threads,
-        lora_dir=_normalize_optional_path("lora_dir", lora_dir),
+        lora_dir=_normalize_optional_store_id("lora_dir", lora_dir),
         lora_quant=_normalize_optional_text("lora_quant", lora_quant),
         unembed_quant=_normalize_optional_text("unembed_quant", unembed_quant),
     )
 
 
-def _normalize_optional_path(field_name: str, value: str | Path | None) -> Path | None:
-    if value is None:
-        return None
+def _normalize_store_id(field_name: str, value: str | Path) -> Path:
     normalized = _first_protocol_line(str(value))
     if not normalized.strip():
         raise ValueError(f"{field_name} must not be empty")
-    return Path(normalized)
+    try:
+        return _model_store.resolve_existing_store_id(
+            normalized,
+            error_type=InvalidRequestError,
+        )
+    except InvalidRequestError as exc:
+        raise InvalidRequestError(f"{field_name}: {exc}") from exc
+
+
+def _normalize_optional_store_id(field_name: str, value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    return _normalize_store_id(field_name, value)
 
 
 def _normalize_optional_text(field_name: str, value: str | None) -> str | None:
@@ -556,4 +567,3 @@ def _normalize_optional_text(field_name: str, value: str | None) -> str | None:
     if not normalized.strip():
         raise ValueError(f"{field_name} must not be empty")
     return normalized
-

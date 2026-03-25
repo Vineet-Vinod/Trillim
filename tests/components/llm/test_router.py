@@ -2,22 +2,41 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
-import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
 
+from trillim import _model_store
 from trillim.components.llm import ChatUsage
-from trillim.server import Server
-from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model, model_dir
 from trillim.components.llm.public import LLM
+from trillim.server import Server
+from tests.components.llm.support import (
+    FakeEngineFactory,
+    FakeTokenizer,
+    make_runtime_model,
+    patched_model_store,
+    write_adapter_bundle,
+    write_model_bundle,
+)
 
 
 class LLMRouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(patched_model_store())
+
+    def _ensure_store_dir(self, store_id: str) -> Path:
+        path = _model_store.store_path_for_id(store_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _make_server(self, *, allow_hot_swap: bool = False, responses=None):
+        self._ensure_store_dir("Trillim/fake")
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda path: make_runtime_model(
                 Path(f"/tmp/{Path(str(path)).name}"),
                 name=Path(str(path)).name,
@@ -37,23 +56,23 @@ class LLMRouterTests(unittest.TestCase):
         self.assertEqual(body["data"][0]["id"], "fake")
 
     def test_models_route_reports_adapter_runtime_config(self):
-        with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
-            adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
-            llm = LLM(
-                str(root),
-                num_threads=4,
-                lora_dir=str(adapter),
-                lora_quant="q4_0",
-                unembed_quant="q8_0",
-                _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
-                _engine_factory=FakeEngineFactory(responses=["ok"]),
-            )
-            server = Server(llm)
+        root = _model_store.store_path_for_id("Trillim/root")
+        adapter = _model_store.store_path_for_id("Local/adapter")
+        write_model_bundle(root)
+        write_adapter_bundle(adapter, model_root=root)
+        llm = LLM(
+            "Trillim/root",
+            num_threads=4,
+            lora_dir="Local/adapter",
+            lora_quant="q4_0",
+            unembed_quant="q8_0",
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+        server = Server(llm)
 
-            with TestClient(server.app) as client:
-                response = client.get("/v1/models")
+        with TestClient(server.app) as client:
+            response = client.get("/v1/models")
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -81,8 +100,10 @@ class LLMRouterTests(unittest.TestCase):
             make_runtime_model(Path("/tmp/next"), name="next"),
         ]
         model_iter = iter(models)
+        self._ensure_store_dir("Trillim/fake")
+        self._ensure_store_dir("Trillim/next")
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda _path: next(model_iter),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["unused"]),
@@ -90,7 +111,7 @@ class LLMRouterTests(unittest.TestCase):
         server = Server(llm, allow_hot_swap=True)
 
         async def collect_and_swap(*_args, **_kwargs):
-            await llm.swap_model("models/next")
+            await llm.swap_model("Trillim/next")
             return "hello", ChatUsage(1, 1, 2, 0)
 
         llm._collect_chat = collect_and_swap
@@ -123,17 +144,20 @@ class LLMRouterTests(unittest.TestCase):
 
     def test_swap_route_is_only_registered_when_enabled(self):
         with TestClient(self._make_server(allow_hot_swap=False).app) as client:
-            response = client.post("/v1/models/swap", json={"model_dir": "models/next"})
+            response = client.post("/v1/models/swap", json={"model_dir": "Trillim/next"})
         self.assertEqual(response.status_code, 404)
 
+        self._ensure_store_dir("Trillim/next")
         with TestClient(self._make_server(allow_hot_swap=True).app) as client:
-            response = client.post("/v1/models/swap", json={"model_dir": "models/next"})
+            response = client.post("/v1/models/swap", json={"model_dir": "Trillim/next"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["model"], "next")
 
     def test_swap_route_accepts_search_runtime_options(self):
+        self._ensure_store_dir("Trillim/fake")
+        self._ensure_store_dir("Trillim/next")
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda path: make_runtime_model(
                 Path(f"/tmp/{Path(str(path)).name}"),
                 name=Path(str(path)).name,
@@ -147,7 +171,7 @@ class LLMRouterTests(unittest.TestCase):
             response = client.post(
                 "/v1/models/swap",
                 json={
-                    "model_dir": "models/next",
+                    "model_dir": "Trillim/next",
                     "harness_name": "search",
                     "search_provider": "BRAVE_SEARCH",
                     "search_token_budget": 2048,
@@ -160,29 +184,31 @@ class LLMRouterTests(unittest.TestCase):
         self.assertEqual(llm._configured_search_token_budget, 2048)
 
     def test_swap_route_accepts_init_runtime_options(self):
-        with model_dir() as root, model_dir() as next_root, tempfile.TemporaryDirectory() as temp_dir:
-            adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
-            factory = FakeEngineFactory(responses=["ok"])
-            llm = LLM(
-                str(root),
-                _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
-                _engine_factory=factory,
-            )
-            server = Server(llm, allow_hot_swap=True)
+        root = _model_store.store_path_for_id("Trillim/root")
+        next_root = _model_store.store_path_for_id("Trillim/next")
+        adapter = _model_store.store_path_for_id("Local/adapter")
+        write_model_bundle(root)
+        write_model_bundle(next_root)
+        write_adapter_bundle(adapter, model_root=root)
+        factory = FakeEngineFactory(responses=["ok"])
+        llm = LLM(
+            "Trillim/root",
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=factory,
+        )
+        server = Server(llm, allow_hot_swap=True)
 
-            with TestClient(server.app) as client:
-                response = client.post(
-                    "/v1/models/swap",
-                    json={
-                        "model_dir": str(next_root),
-                        "num_threads": 7,
-                        "lora_dir": str(adapter),
-                        "lora_quant": "q4_0",
-                        "unembed_quant": "q8_0",
-                    },
-                )
+        with TestClient(server.app) as client:
+            response = client.post(
+                "/v1/models/swap",
+                json={
+                    "model_dir": "Trillim/next",
+                    "num_threads": 7,
+                    "lora_dir": "Local/adapter",
+                    "lora_quant": "q4_0",
+                    "unembed_quant": "q8_0",
+                },
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["path"], str(next_root))
@@ -192,24 +218,26 @@ class LLMRouterTests(unittest.TestCase):
         self.assertEqual(factory.instances[-1].init_config.lora_dir, adapter)
 
     def test_swap_route_resets_init_runtime_options_to_defaults_when_omitted(self):
-        with model_dir() as root, model_dir() as next_root, tempfile.TemporaryDirectory() as temp_dir:
-            adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
-            factory = FakeEngineFactory(responses=["ok"])
-            llm = LLM(
-                str(root),
-                num_threads=4,
-                lora_dir=str(adapter),
-                lora_quant="q4_0",
-                unembed_quant="q8_0",
-                _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
-                _engine_factory=factory,
-            )
-            server = Server(llm, allow_hot_swap=True)
+        root = _model_store.store_path_for_id("Trillim/root")
+        next_root = _model_store.store_path_for_id("Trillim/next")
+        adapter = _model_store.store_path_for_id("Local/adapter")
+        write_model_bundle(root)
+        write_model_bundle(next_root)
+        write_adapter_bundle(adapter, model_root=root)
+        factory = FakeEngineFactory(responses=["ok"])
+        llm = LLM(
+            "Trillim/root",
+            num_threads=4,
+            lora_dir="Local/adapter",
+            lora_quant="q4_0",
+            unembed_quant="q8_0",
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=factory,
+        )
+        server = Server(llm, allow_hot_swap=True)
 
-            with TestClient(server.app) as client:
-                response = client.post("/v1/models/swap", json={"model_dir": str(next_root)})
+        with TestClient(server.app) as client:
+            response = client.post("/v1/models/swap", json={"model_dir": "Trillim/next"})
 
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()["adapter_path"])
@@ -220,18 +248,27 @@ class LLMRouterTests(unittest.TestCase):
         self.assertIsNone(factory.instances[-1].init_config.lora_dir)
 
     def test_swap_route_rejects_unknown_harness_with_400(self):
+        self._ensure_store_dir("Trillim/next")
         with TestClient(self._make_server(allow_hot_swap=True).app) as client:
             response = client.post(
                 "/v1/models/swap",
-                json={"model_dir": "models/next", "harness_name": "bogus"},
+                json={"model_dir": "Trillim/next", "harness_name": "bogus"},
             )
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("Unknown harness", response.json()["detail"])
 
+    def test_swap_route_rejects_raw_model_paths_with_400(self):
+        with TestClient(self._make_server(allow_hot_swap=True).app) as client:
+            response = client.post("/v1/models/swap", json={"model_dir": "/tmp/ignored"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Trillim/<name> or Local/<name>", response.json()["detail"])
+
     def test_chat_completions_reports_end_of_turn_usage_with_search_harness(self):
+        self._ensure_store_dir("Trillim/fake")
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             harness_name="search",
             search_provider="ddgs",
             _model_validator=lambda path: make_runtime_model(

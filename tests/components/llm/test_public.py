@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from contextlib import ExitStack
+from pathlib import Path, PureWindowsPath
 import tempfile
 import typing
 import unittest
 
+from trillim import _model_store
 import trillim.components.llm as llm_exports
 import trillim.components.llm.public as llm_public_exports
 from trillim.components.llm import ChatSession
@@ -15,13 +17,31 @@ from trillim.components.llm._session import _ChatSession
 from trillim.components.llm.public import LLM
 from trillim.errors import AdmissionRejectedError, ComponentLifecycleError
 from trillim.harnesses.search._harness import _SearchHarness
-from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model, model_dir
+from tests.components.llm.support import (
+    FakeEngineFactory,
+    FakeTokenizer,
+    make_runtime_model,
+    patched_model_store,
+    write_adapter_bundle,
+    write_model_bundle,
+)
 
 
 class PublicLLMTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(patched_model_store())
+
+    def _ensure_store_dir(self, store_id: str) -> Path:
+        path = _model_store.store_path_for_id(store_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _make_llm(self, *, responses=None):
+        self._ensure_store_dir("Trillim/fake")
         return LLM(
-            "models/fake",
+            "Trillim/fake",
             _model_validator=lambda path: make_runtime_model(
                 Path(f"/tmp/{Path(str(path)).name}"),
                 name=Path(str(path)).name,
@@ -128,17 +148,55 @@ class PublicLLMTests(unittest.IsolatedAsyncioTestCase):
         llm = self._make_llm()
 
         with self.assertRaisesRegex(ComponentLifecycleError, "requires the component to be running"):
-            await llm.swap_model("models/next")
+            await llm.swap_model("Trillim/next")
 
         await llm.start()
         await llm.stop()
 
         with self.assertRaisesRegex(ComponentLifecycleError, "requires the component to be running"):
-            await llm.swap_model("models/next")
+            await llm.swap_model("Trillim/next")
+
+    def test_public_llm_rejects_raw_model_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "model_dir: Model IDs must use the form Trillim/<name> or Local/<name>"):
+                LLM(
+                    Path(temp_dir),
+                    _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
+                    _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+                    _engine_factory=FakeEngineFactory(responses=["ok"]),
+                )
+
+    def test_public_llm_rejects_raw_lora_paths(self):
+        self._ensure_store_dir("Trillim/fake")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "lora_dir: Model IDs must use the form Trillim/<name> or Local/<name>"):
+                LLM(
+                    "Trillim/fake",
+                    lora_dir=Path(temp_dir),
+                    _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
+                    _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+                    _engine_factory=FakeEngineFactory(responses=["ok"]),
+                )
+
+    def test_public_llm_accepts_windows_path_store_ids(self):
+        root = self._ensure_store_dir("Trillim/fake")
+        adapter = self._ensure_store_dir("Local/adapter")
+
+        llm = LLM(
+            PureWindowsPath("Trillim/fake"),
+            lora_dir=PureWindowsPath("Local/adapter"),
+            _model_validator=lambda _: make_runtime_model(Path("/tmp/fake-model")),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+
+        self.assertEqual(llm._configured_init_config.model_dir, root)
+        self.assertEqual(llm._configured_init_config.lora_dir, adapter)
 
     async def test_search_harness_binds_and_clamps_runtime_budget(self):
+        self._ensure_store_dir("Trillim/fake")
         llm = LLM(
-            "models/fake",
+            "Trillim/fake",
             harness_name="search",
             search_provider="BRAVE_SEARCH",
             search_token_budget=2048,
@@ -158,68 +216,70 @@ class PublicLLMTests(unittest.IsolatedAsyncioTestCase):
         await llm.stop()
 
     async def test_model_info_reports_adapter_runtime_config(self):
-        with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
-            adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
-            tokenizer_paths: list[Path] = []
-            factory = FakeEngineFactory(responses=["ok"])
+        root = _model_store.store_path_for_id("Trillim/root")
+        adapter = _model_store.store_path_for_id("Local/adapter")
+        write_model_bundle(root)
+        write_adapter_bundle(adapter, model_root=root)
+        tokenizer_paths: list[Path] = []
+        factory = FakeEngineFactory(responses=["ok"])
 
-            def load_fake_tokenizer(path, **_kwargs):
-                tokenizer_paths.append(Path(path))
-                return FakeTokenizer()
+        def load_fake_tokenizer(path, **_kwargs):
+            tokenizer_paths.append(Path(path))
+            return FakeTokenizer()
 
-            llm = LLM(
-                str(root),
-                num_threads=6,
-                lora_dir=f"{adapter}\nignored=1",
-                lora_quant="q4_0\nignored=1",
-                unembed_quant="q8_0\nignored=1",
-                _tokenizer_loader=load_fake_tokenizer,
-                _engine_factory=factory,
-            )
+        llm = LLM(
+            "Trillim/root",
+            num_threads=6,
+            lora_dir="Local/adapter\nignored=1",
+            lora_quant="q4_0\nignored=1",
+            unembed_quant="q8_0\nignored=1",
+            _tokenizer_loader=load_fake_tokenizer,
+            _engine_factory=factory,
+        )
 
-            await llm.start()
+        await llm.start()
 
-            info = llm.model_info()
+        info = llm.model_info()
 
-            self.assertEqual(info.path, str(root))
-            self.assertEqual(info.adapter_path, str(adapter))
-            self.assertIsNotNone(info.init_config)
-            self.assertEqual(info.init_config.num_threads, 6)
-            self.assertEqual(info.init_config.lora_quant, "q4_0")
-            self.assertEqual(info.init_config.unembed_quant, "q8_0")
-            self.assertNotEqual(tokenizer_paths[0], root)
-            self.assertEqual(factory.instances[0].init_config.lora_dir, adapter)
-            await llm.stop()
+        self.assertEqual(info.path, str(root))
+        self.assertEqual(info.adapter_path, str(adapter))
+        self.assertIsNotNone(info.init_config)
+        self.assertEqual(info.init_config.num_threads, 6)
+        self.assertEqual(info.init_config.lora_quant, "q4_0")
+        self.assertEqual(info.init_config.unembed_quant, "q8_0")
+        self.assertNotEqual(tokenizer_paths[0], root)
+        self.assertEqual(factory.instances[0].init_config.lora_dir, adapter)
+        await llm.stop()
 
     async def test_swap_model_resets_init_runtime_options_to_defaults_when_omitted(self):
-        with model_dir() as root, model_dir() as next_root, tempfile.TemporaryDirectory() as temp_dir:
-            adapter = Path(temp_dir) / "adapter"
-            adapter.mkdir()
-            (adapter / "qmodel.lora").write_bytes(b"adapter")
-            factory = FakeEngineFactory(responses=["ok"])
-            llm = LLM(
-                str(root),
-                num_threads=6,
-                lora_dir=str(adapter),
-                lora_quant="q4_0",
-                unembed_quant="q8_0",
-                _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
-                _engine_factory=factory,
-            )
+        root = _model_store.store_path_for_id("Trillim/root")
+        next_root = _model_store.store_path_for_id("Trillim/next")
+        adapter = _model_store.store_path_for_id("Local/adapter")
+        write_model_bundle(root)
+        write_model_bundle(next_root)
+        write_adapter_bundle(adapter, model_root=root)
+        factory = FakeEngineFactory(responses=["ok"])
+        llm = LLM(
+            "Trillim/root",
+            num_threads=6,
+            lora_dir="Local/adapter",
+            lora_quant="q4_0",
+            unembed_quant="q8_0",
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=factory,
+        )
 
-            await llm.start()
-            info = await llm.swap_model(str(next_root))
+        await llm.start()
+        info = await llm.swap_model("Trillim/next")
 
-            self.assertEqual(info.path, str(next_root))
-            self.assertIsNone(info.adapter_path)
-            self.assertIsNotNone(info.init_config)
-            self.assertEqual(info.init_config.num_threads, 0)
-            self.assertIsNone(info.init_config.lora_quant)
-            self.assertIsNone(info.init_config.unembed_quant)
-            self.assertEqual(factory.instances[-1].init_config.num_threads, 0)
-            self.assertIsNone(factory.instances[-1].init_config.lora_dir)
-            self.assertIsNone(factory.instances[-1].init_config.lora_quant)
-            self.assertIsNone(factory.instances[-1].init_config.unembed_quant)
-            await llm.stop()
+        self.assertEqual(info.path, str(next_root))
+        self.assertIsNone(info.adapter_path)
+        self.assertIsNotNone(info.init_config)
+        self.assertEqual(info.init_config.num_threads, 0)
+        self.assertIsNone(info.init_config.lora_quant)
+        self.assertIsNone(info.init_config.unembed_quant)
+        self.assertEqual(factory.instances[-1].init_config.num_threads, 0)
+        self.assertIsNone(factory.instances[-1].init_config.lora_dir)
+        self.assertIsNone(factory.instances[-1].init_config.lora_quant)
+        self.assertIsNone(factory.instances[-1].init_config.unembed_quant)
+        await llm.stop()

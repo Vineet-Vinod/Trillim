@@ -16,6 +16,7 @@ from trillim.components.tts._validation import load_safe_voice_state_bytes
 from trillim.errors import ProgressTimeoutError
 from trillim.components.tts._worker import (
     WorkerFailureError,
+    _VOICE_CLONE_AUTH_ERROR,
     _audio_tensor_to_pcm_bytes,
     _load_worker_state,
     build_voice_state,
@@ -135,11 +136,7 @@ class TTSWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_audio_tensor_to_pcm_bytes_and_auth_error_detection(self):
         self.assertEqual(len(_audio_tensor_to_pcm_bytes([0.0, 0.5])), 4)
-        self.assertTrue(
-            is_voice_cloning_auth_error(
-                "Please accept the terms and make sure you're logged in locally for voice cloning"
-            )
-        )
+        self.assertTrue(is_voice_cloning_auth_error(_VOICE_CLONE_AUTH_ERROR.upper()))
 
     def test_load_worker_state_rejects_unsafe_serialized_state(self):
         good_path = self.root / "voice.state"

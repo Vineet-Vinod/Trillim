@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import tempfile
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
+from trillim import _model_store
 from trillim.components.llm._config import (
     ActivationType,
     ArchitectureType,
@@ -15,6 +17,7 @@ from trillim.components.llm._config import (
     SamplingDefaults,
 )
 from trillim.components.llm._engine import EngineCrashedError, EngineProgressTimeoutError
+from trillim.components.llm._model_dir import _compute_base_model_config_hash
 
 
 class FakeTokenizer:
@@ -204,6 +207,61 @@ def make_runtime_model(path: Path, name: str | None = None) -> ModelRuntimeConfi
 
 
 @contextmanager
+def patched_model_store():
+    """Patch the shared model-store roots to one temporary directory."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(_model_store, "MODELS_ROOT", root))
+            stack.enter_context(
+                patch.object(_model_store, "DOWNLOADED_ROOT", root / "Trillim")
+            )
+            stack.enter_context(
+                patch.object(_model_store, "LOCAL_ROOT", root / "Local")
+            )
+            yield root
+
+
+def write_model_bundle(
+    path: Path,
+    *,
+    architecture: str = "LlamaForCausalLM",
+    hidden_act: str = "silu",
+    tokenizer_payload: dict | None = None,
+    text_config: dict | None = None,
+    extra_config: dict | None = None,
+) -> None:
+    """Write a minimal validated model bundle to one existing or new directory."""
+    path.mkdir(parents=True, exist_ok=True)
+    config = {
+        "architectures": [architecture],
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 4,
+        "vocab_size": 256,
+        "max_position_embeddings": 512,
+        "hidden_act": hidden_act,
+        "eos_token_id": 2,
+    }
+    if text_config is not None:
+        config = {"text_config": text_config, "architectures": [architecture]}
+    if extra_config:
+        config.update(extra_config)
+    (path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    tokenizer_json = tokenizer_payload or {
+        "added_tokens": [{"content": "</s>", "id": 2}]
+    }
+    (path / "tokenizer.json").write_text(
+        json.dumps(tokenizer_json),
+        encoding="utf-8",
+    )
+    (path / "qmodel.tensors").write_bytes(b"quantized-model")
+    (path / "rope.cache").write_bytes(b"rope-cache")
+
+
+@contextmanager
 def model_dir(
     *,
     architecture: str = "LlamaForCausalLM",
@@ -215,32 +273,14 @@ def model_dir(
     """Create a temporary on-disk model directory for validation tests."""
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
-        config = {
-            "architectures": [architecture],
-            "hidden_size": 128,
-            "intermediate_size": 256,
-            "num_attention_heads": 4,
-            "num_hidden_layers": 2,
-            "num_key_value_heads": 4,
-            "vocab_size": 256,
-            "max_position_embeddings": 512,
-            "hidden_act": hidden_act,
-            "eos_token_id": 2,
-        }
-        if text_config is not None:
-            config = {"text_config": text_config, "architectures": [architecture]}
-        if extra_config:
-            config.update(extra_config)
-        (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
-        tokenizer_json = tokenizer_payload or {
-            "added_tokens": [{"content": "</s>", "id": 2}]
-        }
-        (root / "tokenizer.json").write_text(
-            json.dumps(tokenizer_json),
-            encoding="utf-8",
+        write_model_bundle(
+            root,
+            architecture=architecture,
+            hidden_act=hidden_act,
+            tokenizer_payload=tokenizer_payload,
+            text_config=text_config,
+            extra_config=extra_config,
         )
-        (root / "qmodel.tensors").write_bytes(b"quantized-model")
-        (root / "rope.cache").write_bytes(b"rope-cache")
         yield root
 
 
@@ -252,3 +292,24 @@ def progress_timeout() -> EngineProgressTimeoutError:
 def crashed() -> EngineCrashedError:
     """Return a reusable fake engine-crash error."""
     return EngineCrashedError("Inference engine crashed: boom")
+
+
+def write_adapter_bundle(
+    adapter_dir: Path,
+    *,
+    model_root: Path | None = None,
+    base_model_config_hash: str | None = None,
+    format_version: int = 3,
+) -> None:
+    """Write a minimal adapter bundle that satisfies the runtime contract."""
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    (adapter_dir / "qmodel.lora").write_bytes(b"adapter")
+    if base_model_config_hash is None and model_root is not None:
+        base_model_config_hash = _compute_base_model_config_hash(model_root)
+    payload: dict[str, object] = {"format_version": format_version}
+    if base_model_config_hash is not None:
+        payload["base_model_config_hash"] = base_model_config_hash
+    (adapter_dir / "trillim_config.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )

@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 import unittest
 
+from trillim import _model_store
 from trillim.components.llm._config import LLMState
 from trillim.components.llm._swap import restart_model
 from trillim.components.llm.public import LLM
 from trillim.harnesses.search._harness import _SearchHarness
-from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model
+from tests.components.llm.support import (
+    FakeEngineFactory,
+    FakeTokenizer,
+    make_runtime_model,
+    patched_model_store,
+)
 
 
 class SwapTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(patched_model_store())
+
+    def _ensure_store_dir(self, store_id: str) -> None:
+        _model_store.store_path_for_id(store_id).mkdir(parents=True, exist_ok=True)
+
     async def test_swap_model_stops_old_engine_before_starting_new_one(self):
         models = [
             make_runtime_model(Path("/tmp/model-one"), name="model-one"),
@@ -21,15 +36,17 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         lifecycle_log: list[str] = []
         model_iter = iter(models)
         factory = FakeEngineFactory(responses=["one"], lifecycle_log=lifecycle_log)
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
         llm = LLM(
-            "models/one",
+            "Trillim/one",
             _model_validator=lambda _: next(model_iter),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=factory,
         )
         await llm.start()
 
-        await llm.swap_model("models/two")
+        await llm.swap_model("Trillim/two")
 
         self.assertEqual(
             lifecycle_log,
@@ -44,8 +61,10 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         ]
         model_iter = iter(models)
         factory = FakeEngineFactory(responses=["one"])
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
         llm = LLM(
-            "models/one",
+            "Trillim/one",
             _model_validator=lambda _: next(model_iter),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=factory,
@@ -53,7 +72,7 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         await llm.start()
         session = llm.open_session([{"role": "user", "content": "hello"}])
 
-        info = await llm.swap_model("models/two")
+        info = await llm.swap_model("Trillim/two")
 
         self.assertEqual(info.name, "model-two")
         self.assertEqual(session.state, "stale")
@@ -68,8 +87,10 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         ]
         model_iter = iter(models)
         factory = FakeEngineFactory(responses=["one"])
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
         llm = LLM(
-            "models/one",
+            "Trillim/one",
             _model_validator=lambda _: next(model_iter),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=factory,
@@ -78,7 +99,7 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         llm._engine_factory = FakeEngineFactory(start_error=RuntimeError("boom"))
 
         with self.assertRaisesRegex(RuntimeError, "boom"):
-            await llm.swap_model("models/two")
+            await llm.swap_model("Trillim/two")
 
         self.assertEqual(llm.state, LLMState.SERVER_ERROR)
         self.assertIsNone(llm.model_name)
@@ -90,8 +111,11 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
             make_runtime_model(Path("/tmp/model-three"), name="model-three"),
         ]
         model_iter = iter(models)
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
+        self._ensure_store_dir("Trillim/three")
         llm = LLM(
-            "models/one",
+            "Trillim/one",
             _model_validator=lambda _: next(model_iter),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["one"]),
@@ -100,12 +124,12 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         llm._engine_factory = FakeEngineFactory(start_error=RuntimeError("boom"))
 
         with self.assertRaisesRegex(RuntimeError, "boom"):
-            await llm.swap_model("models/two")
+            await llm.swap_model("Trillim/two")
 
         self.assertEqual(llm.state, LLMState.SERVER_ERROR)
 
         llm._engine_factory = FakeEngineFactory(responses=["three"])
-        info = await llm.swap_model("models/three")
+        info = await llm.swap_model("Trillim/three")
 
         self.assertEqual(info.state, LLMState.RUNNING)
         self.assertEqual(info.name, "model-three")
@@ -118,8 +142,10 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
             make_runtime_model(Path("/tmp/model-two"), name="model-two"),
         ]
         model_iter = iter(models)
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
         llm = LLM(
-            "models/one",
+            "Trillim/one",
             _model_validator=lambda _: next(model_iter),
             _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
             _engine_factory=FakeEngineFactory(responses=["one"]),
@@ -127,7 +153,7 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         await llm.start()
 
         await llm.swap_model(
-            "models/two",
+            "Trillim/two",
             harness_name="search",
             search_provider="BRAVE_SEARCH",
             search_token_budget=2048,
@@ -141,8 +167,9 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         await llm.stop()
 
     async def test_restart_model_preserves_search_runtime_options(self):
+        self._ensure_store_dir("Trillim/one")
         llm = LLM(
-            "models/one",
+            "Trillim/one",
             harness_name="search",
             search_provider="BRAVE_SEARCH",
             search_token_budget=2048,

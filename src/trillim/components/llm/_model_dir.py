@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -48,6 +49,7 @@ _TOKENIZER_FALLBACK_FILES = (
 _MAX_REMOTE_CODE_DEPTH = 16
 _MAX_REMOTE_CODE_FILES = 64
 _MAX_REMOTE_CODE_BYTES = 4 * 1024 * 1024
+_SUPPORTED_ADAPTER_FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +174,11 @@ def validate_model_dir(
     )
 
 
-def validate_lora_dir(lora_dir: str | Path) -> Path:
+def validate_lora_dir(
+    lora_dir: str | Path,
+    *,
+    model_dir: str | Path | None = None,
+) -> Path:
     """Validate a LoRA directory path."""
     path = _resolve_directory(
         lora_dir,
@@ -180,6 +186,14 @@ def validate_lora_dir(lora_dir: str | Path) -> Path:
         symlink_message="LoRA directory must not use symlinks",
     )
     _require_adapter_artifacts(path)
+    adapter_config = _load_adapter_config(path)
+    _validate_adapter_metadata(path, adapter_config=adapter_config)
+    if model_dir is not None:
+        _validate_adapter_compatibility(
+            path,
+            adapter_config=adapter_config,
+            model_dir=Path(model_dir),
+        )
     return path
 
 
@@ -197,7 +211,7 @@ def prepare_runtime_files(
     _require_runtime_artifacts(model_dir)
     if init_config.lora_dir is None:
         return RuntimeFiles(model_dir=model_dir, metadata_dir=model_dir)
-    adapter_dir = validate_lora_dir(init_config.lora_dir)
+    adapter_dir = validate_lora_dir(init_config.lora_dir, model_dir=model_dir)
     _ensure_overlay_filesystem_supported(model_dir, adapter_dir)
     temp_dir = TemporaryDirectory(prefix="trillim-llm-")
     overlay_dir = Path(temp_dir.name)
@@ -268,6 +282,82 @@ def _require_adapter_artifacts(adapter_dir: Path) -> None:
         _raise_if_symlink(artifact_path, "LoRA directory must not use symlinks")
         if not artifact_path.is_file():
             raise ModelValidationError(f"{filename} not found in {adapter_dir}")
+
+
+def _load_adapter_config(adapter_dir: Path) -> dict:
+    config_path = adapter_dir / "trillim_config.json"
+    _raise_if_symlink(config_path, "LoRA directory must not use symlinks")
+    if not config_path.is_file():
+        raise ModelValidationError(f"trillim_config.json not found in {adapter_dir}")
+    payload = _load_json(config_path)
+    if not isinstance(payload, dict):
+        raise ModelValidationError(
+            f"Adapter metadata must be a JSON object in {config_path}"
+        )
+    return payload
+
+
+def _validate_adapter_metadata(
+    adapter_dir: Path,
+    *,
+    adapter_config: dict,
+) -> None:
+    format_version = adapter_config.get("format_version", 1)
+    stored_hash = adapter_config.get("base_model_config_hash")
+    if (
+        not isinstance(format_version, int)
+        or format_version < _SUPPORTED_ADAPTER_FORMAT_VERSION
+        or not isinstance(stored_hash, str)
+        or not stored_hash
+    ):
+        raise ModelValidationError(
+            f"Adapter compatibility metadata is missing or unsupported in {adapter_dir}"
+        )
+
+
+def _validate_adapter_compatibility(
+    adapter_dir: Path,
+    *,
+    adapter_config: dict,
+    model_dir: Path,
+) -> None:
+    stored_hash = adapter_config["base_model_config_hash"]
+    current_hash = _compute_base_model_config_hash(model_dir)
+    if current_hash != stored_hash:
+        source_model = adapter_config.get("source_model")
+        detail = (
+            "this adapter was quantized for a different base model"
+            if not isinstance(source_model, str) or not source_model
+            else f"this adapter was quantized for {source_model!r}"
+        )
+        raise ModelValidationError(
+            f"Adapter/model mismatch: {detail}"
+        )
+
+
+def _compute_base_model_config_hash(model_dir: Path) -> str:
+    config = _canonicalize_model_config(_load_json(model_dir / "config.json"))
+    num_heads = _require_positive_int(
+        config.get("num_attention_heads"),
+        "num_attention_heads",
+    )
+    num_kv_heads = _require_positive_int(
+        config.get("num_key_value_heads", num_heads),
+        "num_key_value_heads",
+    )
+    identity = {
+        "architectures": config.get("architectures", []),
+        "hidden_size": config.get("hidden_size"),
+        "intermediate_size": config.get("intermediate_size"),
+        "num_hidden_layers": config.get("num_hidden_layers"),
+        "num_attention_heads": num_heads,
+        "num_key_value_heads": num_kv_heads,
+        "vocab_size": config.get("vocab_size"),
+    }
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _extract_dimensions(config: dict) -> dict[str, int]:

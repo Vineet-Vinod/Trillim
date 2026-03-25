@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from trillim import _model_store
 from trillim.components.llm import ChatDoneEvent
 from trillim.components.llm.public import LLM
 from trillim.errors import SessionExhaustedError
@@ -14,7 +16,12 @@ from trillim.harnesses.search.provider import (
     SearchAuthenticationError,
     SearchError,
 )
-from tests.components.llm.support import FakeEngineFactory, FakeTokenizer, make_runtime_model
+from tests.components.llm.support import (
+    FakeEngineFactory,
+    FakeTokenizer,
+    make_runtime_model,
+    patched_model_store,
+)
 
 
 class _SuccessfulSearch:
@@ -38,9 +45,15 @@ class _AuthFailingSearch:
 
 
 class SearchHarnessTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._stack = ExitStack()
+        self.addCleanup(self._stack.close)
+        self._stack.enter_context(patched_model_store())
+        _model_store.store_path_for_id("Trillim/fake").mkdir(parents=True, exist_ok=True)
+
     def _make_llm(self, *, responses, search_token_budget: int = 32) -> LLM:
         return LLM(
-            "models/fake",
+            "Trillim/fake",
             harness_name="search",
             search_provider="ddgs",
             search_token_budget=search_token_budget,

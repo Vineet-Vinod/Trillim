@@ -90,10 +90,10 @@ class SwapModelRequestInput(BaseModel):
         default=None, min_length=1, max_length=MAX_MODEL_PATH_CHARS
     )
     lora_quant: str | None = Field(
-        default="bf16", min_length=1, max_length=MAX_MODEL_NAME_CHARS
+        default=None, min_length=1, max_length=MAX_MODEL_NAME_CHARS
     )
     unembed_quant: str | None = Field(
-        default="int8", min_length=1, max_length=MAX_MODEL_NAME_CHARS
+        default=None, min_length=1, max_length=MAX_MODEL_NAME_CHARS
     )
     harness_name: str | None = Field(default=None, max_length=MAX_MODEL_NAME_CHARS)
     search_provider: str | None = Field(default=None, max_length=MAX_MODEL_NAME_CHARS)
