@@ -19,6 +19,7 @@ from trillim.components.llm._model_dir import (
 )
 from trillim.errors import ModelValidationError
 from tests.components.llm.support import model_dir, write_adapter_bundle
+from tests.components.llm.support import write_model_bundle
 
 
 class ModelDirectoryTests(unittest.TestCase):
@@ -144,6 +145,18 @@ class ModelDirectoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ModelValidationError, "must not use symlinks"):
                 validate_model_dir(root)
+
+    def test_validate_model_dir_fails_closed_on_malformed_added_tokens_entries(self):
+        for filename in ("tokenizer.json", "added_tokens.json"):
+            with self.subTest(filename=filename):
+                with model_dir() as root:
+                    (root / filename).write_text(
+                        json.dumps({"added_tokens": ["oops"]}),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(ModelValidationError, "added_tokens"):
+                        validate_model_dir(root)
 
     def test_validate_lora_dir_rejects_symlinked_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:

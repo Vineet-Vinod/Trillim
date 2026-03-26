@@ -183,7 +183,9 @@ async def swap_running_llm(llm):
 Important hot-swap behavior:
 
 - The component must already be running.
+- Concurrent swap requests fail fast instead of queueing behind an in-flight preflight or handoff.
 - Existing sessions become stale once swap handoff begins.
+- `stop()` wins over in-flight startup, hot swap, and recovery restart work; if shutdown races with replacement-model preflight or handoff, Trillim discards that work and leaves the component `unavailable`.
 - Omitted init-time options reset to Trillim defaults instead of inheriting the previous runtime.
 
 ## Use `STT`

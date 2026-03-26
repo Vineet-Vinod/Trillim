@@ -918,13 +918,23 @@ def _load_required_json_strict(
 def _collect_added_tokens(tokenizer_payload: dict | list | None) -> list[int]:
     if not tokenizer_payload:
         return []
+    if isinstance(tokenizer_payload, list):
+        raise ModelValidationError("added_tokens metadata is malformed")
     token_ids: list[int] = []
     if isinstance(tokenizer_payload, dict):
-        for token in tokenizer_payload.get("added_tokens", []):
-            if token.get("content") in _STOP_TOKEN_NAMES and "id" in token:
-                token_ids.append(int(token["id"]))
-        for token_name in _STOP_TOKEN_NAMES:
-            token_id = tokenizer_payload.get(token_name)
-            if token_id is not None:
-                token_ids.append(int(token_id))
+        added_tokens = tokenizer_payload.get("added_tokens", [])
+        if not isinstance(added_tokens, list):
+            raise ModelValidationError("added_tokens metadata is malformed")
+        try:
+            for token in added_tokens:
+                if not isinstance(token, dict):
+                    raise ModelValidationError("added_tokens metadata is malformed")
+                if token.get("content") in _STOP_TOKEN_NAMES and "id" in token:
+                    token_ids.append(int(token["id"]))
+            for token_name in _STOP_TOKEN_NAMES:
+                token_id = tokenizer_payload.get(token_name)
+                if token_id is not None:
+                    token_ids.append(int(token_id))
+        except (TypeError, ValueError) as exc:
+            raise ModelValidationError("added_tokens metadata is malformed") from exc
     return token_ids

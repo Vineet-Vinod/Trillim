@@ -29,7 +29,12 @@ from trillim.components.llm._model_dir import (
 )
 from trillim.components.llm._router import build_router
 from trillim.components.llm._session import ChatSession, _ChatSession, _create_chat_session
-from trillim.components.llm._swap import _wait_for_idle_or_cancel, restart_model, swap_model
+from trillim.components.llm._swap import (
+    _best_effort_stop,
+    _wait_for_idle_or_cancel,
+    restart_model,
+    swap_model,
+)
 from trillim.components.llm._tokenizer import load_tokenizer
 from trillim.components.llm._validation import validate_messages
 from trillim.harnesses._default import _DefaultHarness
@@ -111,6 +116,12 @@ class LLM(Component):
         self._state = LLMState.UNAVAILABLE
         self._admission = GenerationAdmission()
         self._swap_lock = asyncio.Lock()
+        self._stop_epoch = 0
+        self._stop_requests = 0
+        self._model_transition_claimed = False
+        self._active_model_transitions = 0
+        self._model_transitions_idle = asyncio.Event()
+        self._model_transitions_idle.set()
         self._sessions: weakref.WeakSet[_ChatSession] = weakref.WeakSet()
         self._hot_swap_routes_enabled = False
 
@@ -139,50 +150,73 @@ class LLM(Component):
         """Load the configured model and start the inference engine."""
         if self._engine is not None and self._state == LLMState.RUNNING:
             return
-        built_runtime: _BuiltRuntime | None = None
+        if self._stop_in_progress():
+            raise ComponentLifecycleError("LLM is stopping")
+        self._mark_model_transition_active()
         try:
-            built_runtime = self._build_runtime(
-                self._configured_init_config,
-                harness_name=self._configured_harness_name,
-                search_provider=self._configured_search_provider,
-                search_token_budget=self._configured_search_token_budget,
+            stop_epoch = self._capture_stop_epoch()
+            built_runtime: _BuiltRuntime | None = None
+            try:
+                built_runtime = self._build_runtime(
+                    self._configured_init_config,
+                    harness_name=self._configured_harness_name,
+                    search_provider=self._configured_search_provider,
+                    search_token_budget=self._configured_search_token_budget,
+                )
+                if self._stop_requested_since(stop_epoch):
+                    await self._discard_runtime_after_stop(built_runtime)
+                    raise ComponentLifecycleError("LLM was stopped during startup")
+                await built_runtime.engine.start()
+                if self._stop_requested_since(stop_epoch):
+                    await self._discard_runtime_after_stop(built_runtime)
+                    raise ComponentLifecycleError("LLM was stopped during startup")
+            except ComponentLifecycleError:
+                raise
+            except Exception:
+                if built_runtime is not None:
+                    built_runtime.runtime_files.cleanup()
+                self._clear_runtime()
+                self._state = LLMState.SERVER_ERROR
+                raise
+            self._bind_runtime(
+                built_runtime,
             )
-            await built_runtime.engine.start()
-        except Exception:
-            if built_runtime is not None:
-                built_runtime.runtime_files.cleanup()
-            self._clear_runtime()
-            self._state = LLMState.SERVER_ERROR
-            raise
-        self._bind_runtime(
-            built_runtime,
-        )
-        self._update_configured_runtime(
-            init_config=built_runtime.init_config,
-            harness_name=built_runtime.runtime_options.harness_name,
-            search_provider=built_runtime.runtime_options.search_provider,
-            search_token_budget=built_runtime.runtime_options.requested_search_token_budget,
-        )
-        self._state = LLMState.RUNNING
-        await self._admission.finish_swapping()
+            self._update_configured_runtime(
+                init_config=built_runtime.init_config,
+                harness_name=built_runtime.runtime_options.harness_name,
+                search_provider=built_runtime.runtime_options.search_provider,
+                search_token_budget=built_runtime.runtime_options.requested_search_token_budget,
+            )
+            self._state = LLMState.RUNNING
+            await self._admission.finish_swapping()
+            if self._stop_requested_since(stop_epoch):
+                await self._discard_runtime_after_stop(built_runtime)
+                raise ComponentLifecycleError("LLM was stopped during startup")
+        finally:
+            self._finish_model_transition_active()
 
     async def stop(self) -> None:
         """Stop the inference engine and invalidate live sessions."""
-        await self._admission.start_draining()
-        sessions = list(self._sessions)
-        for session in sessions:
-            session._mark_owner_stopped()
-        for session in sessions:
-            await session._wait_for_termination()
-        engine = self._engine
-        self._clear_runtime()
         try:
-            if engine is not None:
-                await engine.stop()
-        except Exception:
-            self._state = LLMState.SERVER_ERROR
-            raise
-        self._state = LLMState.UNAVAILABLE
+            self._mark_stop_requested()
+            await self._admission.start_draining()
+            sessions = list(self._sessions)
+            for session in sessions:
+                session._mark_owner_stopped()
+            for session in sessions:
+                await session._wait_for_termination()
+            engine = self._engine
+            self._clear_runtime()
+            try:
+                if engine is not None:
+                    await engine.stop()
+            except Exception:
+                self._state = LLMState.SERVER_ERROR
+                raise
+            await self._wait_for_model_transitions()
+            self._state = LLMState.UNAVAILABLE
+        finally:
+            self._finish_stop_request()
 
     def model_info(self) -> ModelInfo:
         """Return truthful runtime metadata for the active model."""
@@ -460,6 +494,59 @@ class LLM(Component):
         self._runtime_search_token_budget = None
         if runtime_files is not None:
             runtime_files.cleanup()
+
+    def _capture_stop_epoch(self) -> int:
+        return self._stop_epoch
+
+    def _stop_in_progress(self) -> bool:
+        return self._stop_requests > 0
+
+    def _stop_requested_since(self, epoch: int | None) -> bool:
+        return epoch is not None and self._stop_epoch != epoch
+
+    def _mark_stop_requested(self) -> None:
+        self._stop_epoch += 1
+        self._stop_requests += 1
+        self._state = LLMState.UNAVAILABLE
+
+    def _finish_stop_request(self) -> None:
+        if self._stop_requests > 0:
+            self._stop_requests -= 1
+
+    def _claim_model_transition(self) -> None:
+        if self._model_transition_claimed:
+            raise AdmissionRejectedError("LLM hot swap is already in progress")
+        self._model_transition_claimed = True
+
+    def _release_model_transition(self) -> None:
+        self._model_transition_claimed = False
+
+    def _mark_model_transition_active(self) -> None:
+        self._active_model_transitions += 1
+        self._model_transitions_idle.clear()
+
+    def _finish_model_transition_active(self) -> None:
+        if self._active_model_transitions > 0:
+            self._active_model_transitions -= 1
+        if self._active_model_transitions == 0:
+            self._model_transitions_idle.set()
+
+    async def _wait_for_model_transitions(self) -> None:
+        await self._model_transitions_idle.wait()
+
+    async def _discard_runtime_after_stop(self, built_runtime: _BuiltRuntime) -> None:
+        if (
+            self._runtime_files is built_runtime.runtime_files
+            or self._engine is built_runtime.engine
+            or self._runtime_model is built_runtime.validated
+        ):
+            self._clear_runtime()
+            await _best_effort_stop(built_runtime.engine)
+            await self._admission.start_draining()
+            self._state = LLMState.UNAVAILABLE
+            return
+        built_runtime.runtime_files.cleanup()
+        await _best_effort_stop(built_runtime.engine)
 
     def _require_runtime(self):
         if self._runtime_model is None or self._engine is None or self._harness is None:

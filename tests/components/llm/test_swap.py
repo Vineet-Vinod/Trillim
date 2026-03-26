@@ -211,6 +211,37 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm._runtime_search_token_budget, 1024)
         await llm.stop()
 
+    async def test_swap_model_preflight_failure_keeps_existing_runtime_running(self):
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
+        models = [
+            make_runtime_model(Path("/tmp/model-one"), name="model-one"),
+            make_runtime_model(Path("/tmp/model-two"), name="model-two"),
+        ]
+        model_iter = iter(models)
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["one", "still-one"]),
+        )
+        await llm.start()
+
+        with self.assertRaisesRegex(ValueError, "search_token_budget must be at least 1"):
+            await llm.swap_model("Trillim/two", search_token_budget=0)
+
+        self.assertEqual(llm.state, LLMState.RUNNING)
+        self.assertEqual(llm.model_name, "model-one")
+        self.assertEqual(
+            await llm.chat([{"role": "user", "content": "hi"}]),
+            "one",
+        )
+        self.assertEqual(
+            await llm.chat([{"role": "user", "content": "again"}]),
+            "still-one",
+        )
+        await llm.stop()
+
     async def test_restart_model_preserves_search_runtime_options(self):
         self._ensure_store_dir("Trillim/one")
         llm = LLM(
@@ -231,6 +262,53 @@ class SwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(llm._configured_search_provider, "brave")
         self.assertEqual(llm._runtime_search_token_budget, 1024)
         await llm.stop()
+
+    async def test_restart_model_does_not_restore_runtime_when_stop_wins_after_handoff(self):
+        self._ensure_store_dir("Trillim/one")
+        models = [
+            make_runtime_model(Path("/tmp/model-one"), name="model-one"),
+            make_runtime_model(Path("/tmp/model-two"), name="model-two"),
+        ]
+        model_iter = iter(models)
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["one"]),
+        )
+        await llm.start()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_finish_swapping = llm._admission.finish_swapping
+
+        async def blocked_finish_swapping() -> None:
+            entered.set()
+            await release.wait()
+            await original_finish_swapping()
+
+        llm._admission.finish_swapping = blocked_finish_swapping
+        restart_task = asyncio.create_task(restart_model(llm))
+        await entered.wait()
+        stop_task = asyncio.create_task(llm.stop())
+
+        try:
+            await asyncio.sleep(0.05)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            release.set()
+            restart_result, stop_result = await asyncio.gather(
+                restart_task,
+                stop_task,
+                return_exceptions=True,
+            )
+            self.assertIsNone(restart_result)
+            self.assertIsNone(stop_result)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            self.assertIsNone(llm.model_name)
+        finally:
+            release.set()
+            await asyncio.gather(restart_task, stop_task, return_exceptions=True)
+            if llm.state == LLMState.RUNNING:
+                await llm.stop()
 
     async def test_restart_model_sets_server_error_when_no_runtime_model_exists(self):
         calls: list[str] = []

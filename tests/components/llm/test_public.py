@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import ExitStack
 from pathlib import Path, PureWindowsPath
 import tempfile
@@ -13,11 +14,13 @@ import trillim.components.llm as llm_exports
 import trillim.components.llm.public as llm_public_exports
 from trillim.components.llm import ChatSession
 from trillim.components.llm._config import LLMState
+from trillim.components.llm._engine import EngineCrashedError
 from trillim.components.llm._session import _ChatSession
 from trillim.components.llm.public import LLM
 from trillim.errors import AdmissionRejectedError, ComponentLifecycleError
 from trillim.harnesses.search._harness import _SearchHarness
 from tests.components.llm.support import (
+    FakeEngine,
     FakeEngineFactory,
     FakeTokenizer,
     make_runtime_model,
@@ -156,6 +159,140 @@ class PublicLLMTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ComponentLifecycleError, "requires the component to be running"):
             await llm.swap_model("Trillim/next")
 
+    async def test_stop_during_start_does_not_restore_running_runtime(self):
+        self._ensure_store_dir("Trillim/one")
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: make_runtime_model(
+                Path("/tmp/model-one"),
+                name="model-one",
+            ),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_finish_swapping = llm._admission.finish_swapping
+
+        async def blocked_finish_swapping() -> None:
+            entered.set()
+            await release.wait()
+            await original_finish_swapping()
+
+        llm._admission.finish_swapping = blocked_finish_swapping
+        start_task = asyncio.create_task(llm.start())
+        await entered.wait()
+        stop_task = asyncio.create_task(llm.stop())
+
+        try:
+            await asyncio.sleep(0.05)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            release.set()
+            start_result, stop_result = await asyncio.gather(
+                start_task,
+                stop_task,
+                return_exceptions=True,
+            )
+            self.assertIsInstance(start_result, ComponentLifecycleError)
+            self.assertIsNone(stop_result)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            self.assertIsNone(llm.model_name)
+        finally:
+            release.set()
+            await asyncio.gather(start_task, stop_task, return_exceptions=True)
+
+    async def test_stale_stop_cleanup_does_not_clobber_new_runtime(self):
+        self._ensure_store_dir("Trillim/one")
+        factory = FakeEngineFactory(responses=["ok"])
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: make_runtime_model(
+                Path("/tmp/model-one"),
+                name="model-one",
+            ),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=factory,
+        )
+        await llm.start()
+        stale_runtime = llm._build_runtime(
+            llm._configured_init_config,
+            harness_name=llm._configured_harness_name,
+            search_provider=llm._configured_search_provider,
+            search_token_budget=llm._configured_search_token_budget,
+        )
+
+        try:
+            await stale_runtime.engine.start()
+            await llm._discard_runtime_after_stop(stale_runtime)
+            self.assertEqual(llm.state, LLMState.RUNNING)
+            self.assertEqual(llm.model_info().state, LLMState.RUNNING)
+            self.assertTrue(llm._admission.accepting)
+            self.assertEqual(await llm.chat([{"role": "user", "content": "hi"}]), "ok")
+            self.assertEqual(stale_runtime.engine.stop_calls, 1)
+        finally:
+            if llm.state == LLMState.RUNNING:
+                await llm.stop()
+
+    async def test_stop_waits_for_inflight_startup_cleanup(self):
+        self._ensure_store_dir("Trillim/one")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _BlockingEngine(FakeEngine):
+            async def start(self) -> None:
+                self.start_calls += 1
+                entered.set()
+                await release.wait()
+
+        class _BlockingEngineFactory:
+            def __init__(self) -> None:
+                self.instances: list[_BlockingEngine] = []
+
+            def __call__(self, model, tokenizer, defaults, **kwargs):
+                engine = _BlockingEngine(
+                    model,
+                    tokenizer,
+                    defaults,
+                    responses=["ok"],
+                    **kwargs,
+                )
+                self.instances.append(engine)
+                return engine
+
+        factory = _BlockingEngineFactory()
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: make_runtime_model(
+                Path("/tmp/model-one"),
+                name="model-one",
+            ),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=factory,
+        )
+        start_task = asyncio.create_task(llm.start())
+        await entered.wait()
+        stop_task = asyncio.create_task(llm.stop())
+
+        try:
+            await asyncio.sleep(0.05)
+            self.assertFalse(stop_task.done())
+
+            release.set()
+            start_result, stop_result = await asyncio.gather(
+                start_task,
+                stop_task,
+                return_exceptions=True,
+            )
+
+            self.assertIsInstance(start_result, ComponentLifecycleError)
+            self.assertIsNone(stop_result)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            self.assertIsNone(llm.model_name)
+            self.assertEqual(factory.instances[0].stop_calls, 1)
+        finally:
+            release.set()
+            await asyncio.gather(start_task, stop_task, return_exceptions=True)
+
     def test_public_llm_rejects_raw_model_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "model_dir: Model IDs must use the form Trillim/<name> or Local/<name>"):
@@ -283,6 +420,240 @@ class PublicLLMTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(factory.instances[-1].init_config.lora_quant)
         self.assertIsNone(factory.instances[-1].init_config.unembed_quant)
         await llm.stop()
+
+    async def test_concurrent_swap_requests_during_preflight_fail_fast_instead_of_queueing(self):
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
+        self._ensure_store_dir("Trillim/three")
+        models = [
+            make_runtime_model(Path("/tmp/model-one"), name="model-one"),
+            make_runtime_model(Path("/tmp/model-two"), name="model-two"),
+            make_runtime_model(Path("/tmp/model-three"), name="model-three"),
+        ]
+        model_iter = iter(models)
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+        await llm.start()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _GateLock:
+            def __init__(self) -> None:
+                self._lock = asyncio.Lock()
+                self._first = True
+
+            async def __aenter__(self):
+                await self._lock.acquire()
+                if self._first:
+                    self._first = False
+                    entered.set()
+                    await release.wait()
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+                self._lock.release()
+
+        llm._swap_lock = _GateLock()
+        first = asyncio.create_task(llm.swap_model("Trillim/two"))
+        await entered.wait()
+        second = asyncio.create_task(llm.swap_model("Trillim/three"))
+
+        try:
+            await asyncio.sleep(0.05)
+            if not second.done():
+                self.fail("concurrent swap requests should fail fast instead of queueing")
+            self.assertFalse(second.cancelled())
+            self.assertIsNotNone(second.exception())
+        finally:
+            if not second.done():
+                second.cancel()
+            release.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+            if llm.state == LLMState.RUNNING:
+                await llm.stop()
+
+    async def test_stop_during_preflight_swap_does_not_restore_running_runtime(self):
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
+        models = [
+            make_runtime_model(Path("/tmp/model-one"), name="model-one"),
+            make_runtime_model(Path("/tmp/model-two"), name="model-two"),
+        ]
+        model_iter = iter(models)
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+        await llm.start()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _GateLock:
+            def __init__(self) -> None:
+                self._lock = asyncio.Lock()
+                self._first = True
+
+            async def __aenter__(self):
+                await self._lock.acquire()
+                if self._first:
+                    self._first = False
+                    entered.set()
+                    await release.wait()
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+                self._lock.release()
+
+        llm._swap_lock = _GateLock()
+        swap_task = asyncio.create_task(llm.swap_model("Trillim/two"))
+        await entered.wait()
+        stop_task = asyncio.create_task(llm.stop())
+
+        try:
+            await asyncio.sleep(0.05)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            release.set()
+            await asyncio.gather(swap_task, stop_task, return_exceptions=True)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            self.assertIsNone(llm.model_name)
+        finally:
+            release.set()
+            await asyncio.gather(swap_task, stop_task, return_exceptions=True)
+            if llm.state == LLMState.RUNNING:
+                await llm.stop()
+
+    async def test_engine_failure_while_swap_claimed_and_preflight_fails_marks_component_unhealthy(self):
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
+        models = [
+            make_runtime_model(Path("/tmp/model-one"), name="model-one"),
+            make_runtime_model(Path("/tmp/model-two"), name="model-two"),
+        ]
+        model_iter = iter(models)
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=lambda _: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+        await llm.start()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _GateLock:
+            def __init__(self) -> None:
+                self._lock = asyncio.Lock()
+                self._first = True
+
+            async def __aenter__(self):
+                await self._lock.acquire()
+                if self._first:
+                    self._first = False
+                    entered.set()
+                    await release.wait()
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+                self._lock.release()
+
+        llm._swap_lock = _GateLock()
+        swap_task = asyncio.create_task(llm.swap_model("Trillim/two", search_token_budget=0))
+        await entered.wait()
+        llm._engine.failure = EngineCrashedError("boom")
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                await llm.chat([{"role": "user", "content": "hello"}])
+
+            release.set()
+            with self.assertRaisesRegex(ValueError, "search_token_budget must be at least 1"):
+                await swap_task
+
+            self.assertEqual(llm.state, LLMState.SERVER_ERROR)
+            self.assertIsNone(llm.model_name)
+            with self.assertRaisesRegex(RuntimeError, "not started"):
+                await llm.chat([{"role": "user", "content": "again"}])
+        finally:
+            release.set()
+            await asyncio.gather(swap_task, return_exceptions=True)
+            if llm.state == LLMState.RUNNING:
+                await llm.stop()
+
+    async def test_stop_during_swap_handoff_does_not_restore_running_runtime(self):
+        self._ensure_store_dir("Trillim/one")
+        self._ensure_store_dir("Trillim/two")
+        model_one_dir = _model_store.store_path_for_id("Trillim/one")
+
+        def validate_model(path: Path) -> object:
+            name = Path(str(path)).name
+            return make_runtime_model(Path(f"/tmp/model-{name}"), name=f"model-{name}")
+
+        llm = LLM(
+            "Trillim/one",
+            _model_validator=validate_model,
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["ok"]),
+        )
+        await llm.start()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_finish_swapping = llm._admission.finish_swapping
+
+        async def blocked_finish_swapping() -> None:
+            entered.set()
+            await release.wait()
+            await original_finish_swapping()
+
+        llm._admission.finish_swapping = blocked_finish_swapping
+        swap_task = asyncio.create_task(
+            llm.swap_model(
+                "Trillim/two",
+                harness_name="search",
+                search_provider="BRAVE_SEARCH",
+                search_token_budget=2048,
+            )
+        )
+        await entered.wait()
+        stop_task = asyncio.create_task(llm.stop())
+
+        try:
+            await asyncio.sleep(0.05)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            release.set()
+            swap_result, stop_result = await asyncio.gather(
+                swap_task,
+                stop_task,
+                return_exceptions=True,
+            )
+            self.assertIsInstance(swap_result, ComponentLifecycleError)
+            self.assertIsNone(stop_result)
+            self.assertEqual(llm.state, LLMState.UNAVAILABLE)
+            self.assertIsNone(llm.model_name)
+            self.assertEqual(llm._configured_init_config.model_dir, model_one_dir)
+            self.assertEqual(llm._configured_harness_name, "default")
+            self.assertEqual(llm._configured_search_provider, "ddgs")
+            self.assertEqual(llm._configured_search_token_budget, 1024)
+
+            await llm.start()
+            self.assertEqual(llm.model_name, "model-one")
+            self.assertEqual(llm._configured_init_config.model_dir, model_one_dir)
+            self.assertEqual(llm._configured_harness_name, "default")
+            self.assertEqual(llm._configured_search_provider, "ddgs")
+            self.assertEqual(llm._configured_search_token_budget, 1024)
+        finally:
+            release.set()
+            await asyncio.gather(swap_task, stop_task, return_exceptions=True)
+            if llm.state == LLMState.RUNNING:
+                await llm.stop()
 
     async def test_public_llm_chats_with_real_adapter_overlay(self):
         root = _model_store.store_path_for_id("Trillim/root")

@@ -114,7 +114,9 @@ Important rules:
 
 - swap can change the base model, adapter, and search/runtime options together
 - replacement-model preflight and setup may happen while the current model is still serving
+- concurrent swap requests fail fast; they are not queued behind an in-flight preflight or handoff
 - once swap handoff begins, existing chat sessions become stale
+- `stop()` is authoritative across startup, hot swap, and recovery restart; if stop wins a race, any preflighted or partially started replacement runtime is discarded and the component remains `unavailable`
 - omitted or `null` init-time swap fields reset to Trillim defaults rather than inheriting the previous runtime's values
 - recovery swaps may be issued from `server_error`
 
