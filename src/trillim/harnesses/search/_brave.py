@@ -62,7 +62,10 @@ class BraveSearchProvider:
         except Exception as exc:
             raise SearchError(f"Brave search failed: {exc}") from exc
         if "gzip" in content_encoding:
-            payload = gzip.decompress(payload)
+            try:
+                payload = gzip.decompress(payload)
+            except Exception as exc:
+                raise SearchError(f"Brave search failed: {exc}") from exc
         try:
             decoded = json.loads(payload.decode("utf-8", errors="ignore"))
         except json.JSONDecodeError as exc:
@@ -85,6 +88,8 @@ class BraveSearchProvider:
         for item in raw_results:
             url = str(item.get("url", "")).strip()
             source = sources.get(url, {}) if isinstance(sources, dict) else {}
+            if not isinstance(source, dict):
+                source = {}
             title = str(item.get("title", "") or source.get("title", "")).strip()
             snippets = item.get("snippets", [])
             snippet = ""

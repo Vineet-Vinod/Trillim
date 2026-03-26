@@ -139,11 +139,14 @@ def build_search_context(
     for result in selected:
         if not is_safe_url(result.url):
             continue
-        body = fetcher(
-            result.url,
-            timeout=FETCH_TIMEOUT_SECONDS,
-            max_bytes=MAX_FETCH_BYTES,
-        )
+        try:
+            body = fetcher(
+                result.url,
+                timeout=FETCH_TIMEOUT_SECONDS,
+                max_bytes=MAX_FETCH_BYTES,
+            )
+        except Exception:
+            continue
         if not body:
             body = result.snippet
         if not body:

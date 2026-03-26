@@ -26,21 +26,23 @@ class DDGSSearchProvider:
                 os.dup2(stderr_fd, 2)
                 os.close(stderr_fd)
                 os.close(devnull_fd)
+            if not raw_results:
+                raise SearchError("DDGS search returned no results")
+            results: list[SearchResult] = []
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    continue
+                result = coerce_search_result(
+                    title=str(item.get("title", "")),
+                    url=str(item.get("href", "")),
+                    snippet=str(item.get("body", "")),
+                )
+                if result is not None:
+                    results.append(result)
+        except SearchError:
+            raise
         except Exception as exc:
             raise SearchError(f"DDGS search failed: {exc}") from exc
-        if not raw_results:
-            raise SearchError("DDGS search returned no results")
-        results: list[SearchResult] = []
-        for item in raw_results:
-            if not isinstance(item, dict):
-                continue
-            result = coerce_search_result(
-                title=str(item.get("title", "")),
-                url=str(item.get("href", "")),
-                snippet=str(item.get("body", "")),
-            )
-            if result is not None:
-                results.append(result)
         if not results:
             raise SearchError("DDGS search returned no usable results")
         return results

@@ -423,7 +423,7 @@ async def copy_source_audio(
     spool_dir: Path,
 ) -> OwnedVoiceUpload:
     """Copy one caller-owned audio file into Trillim-owned temp storage."""
-    source_path = validate_source_audio_path(Path(path))
+    source_path = validate_source_audio_path(path)
     source_fd = open_validated_source_audio_file(source_path)
     return await asyncio.to_thread(_copy_source_audio_sync, source_fd, spool_dir)
 

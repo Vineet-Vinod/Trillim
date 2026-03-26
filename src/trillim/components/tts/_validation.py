@@ -179,9 +179,9 @@ def load_safe_voice_state_bytes(state_bytes: bytes):
     return state
 
 
-def validate_source_audio_path(path: Path) -> Path:
+def validate_source_audio_path(path: str | Path) -> Path:
     """Perform cheap preliminary validation on one caller-owned audio path."""
-    if not str(path):
+    if isinstance(path, str) and not path:
         raise InvalidRequestError("path is required")
     return Path(path).expanduser()
 
