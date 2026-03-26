@@ -180,6 +180,32 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session._terminated.is_set())
         await llm.stop()
 
+    async def test_session_close_from_active_consumer_clears_busy_state_even_if_stream_close_fails(self):
+        llm = self._make_llm()
+        await llm.start()
+        session = llm.open_session([{"role": "user", "content": "hello"}])
+
+        class _BrokenEventStream:
+            async def aclose(self):
+                raise RuntimeError("close boom")
+
+        await session._begin_consumer()
+        session._active_event_stream = _BrokenEventStream()
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "close boom"):
+                await session.close()
+            self.assertEqual(session.state, "closed")
+            self.assertFalse(session._consumer_active)
+            self.assertIsNone(session._active_task)
+            self.assertTrue(session._terminated.is_set())
+        finally:
+            session._active_event_stream = None
+            session._consumer_active = False
+            session._active_task = None
+            session._terminated.set()
+            await llm.stop()
+
     async def test_reset_stream_consumer_sets_terminated_after_cleanup(self):
         llm = self._make_llm()
         await llm.start()

@@ -428,17 +428,32 @@ class CLITests(unittest.TestCase):
         self.assertIs(result, session)
         self.assertIn("hello", output.getvalue())
 
-    def test_stream_assistant_turn_reopens_session_after_keyboard_interrupt(self):
-        reopened = _FakeSession(messages=({"role": "user", "content": "retry"},))
-        runtime = SimpleNamespace(llm=SimpleNamespace(open_session=lambda messages: reopened))
+    def test_stream_assistant_turn_propagates_keyboard_interrupt_after_cleanup(self):
+        runtime = SimpleNamespace(llm=SimpleNamespace(open_session=lambda messages: None))
         session = _FakeSession(
             messages=({"role": "user", "content": "retry"},),
             stream=_FakeStream(next_exception=KeyboardInterrupt()),
         )
         output = io.StringIO()
-        with redirect_stdout(output):
-            result = cli._stream_assistant_turn(runtime, session, session.messages)
-        self.assertIs(result, reopened)
+        with redirect_stdout(output), self.assertRaises(KeyboardInterrupt):
+            cli._stream_assistant_turn(runtime, session, session.messages)
+        self.assertEqual(session.close_calls, 1)
+        self.assertIn("Generation cancelled.", output.getvalue())
+
+    def test_stream_assistant_turn_propagates_keyboard_interrupt_even_if_stream_close_fails(self):
+        runtime = SimpleNamespace(llm=SimpleNamespace(open_session=lambda messages: None))
+        session = _FakeSession(
+            messages=({"role": "user", "content": "retry"},),
+            stream=_FakeStream(
+                next_exception=KeyboardInterrupt(),
+                close_exception=RuntimeError("close failed"),
+            ),
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output), self.assertRaises(KeyboardInterrupt):
+            cli._stream_assistant_turn(runtime, session, session.messages)
+
         self.assertEqual(session.close_calls, 1)
         self.assertIn("Generation cancelled.", output.getvalue())
 
@@ -595,7 +610,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(fake_runtime.llm.opened_messages, [()])
         stream_turn.assert_not_called()
 
-    def test_run_chat_handles_keyboard_interrupt_and_eof_at_prompt(self):
+    def test_run_chat_propagates_keyboard_interrupt_at_prompt_and_closes_runtime(self):
         fake_runtime = _FakeRuntime(object())
         with patch("trillim.cli._require_remote_code_opt_in"), patch(
             "trillim.cli.Runtime",
@@ -608,16 +623,43 @@ class CLITests(unittest.TestCase):
             return_value=object(),
         ), patch(
             "trillim.cli.better_input",
-            side_effect=[KeyboardInterrupt(), EOFError()],
+            side_effect=KeyboardInterrupt(),
         ):
             output = io.StringIO()
-            with redirect_stdout(output):
-                result = cli._run_chat("Trillim/model", None)
-        self.assertEqual(result, 0)
+            with redirect_stdout(output), self.assertRaises(KeyboardInterrupt):
+                cli._run_chat("Trillim/model", None)
+        self.assertTrue(fake_runtime.entered)
+        self.assertTrue(fake_runtime.exited)
         self.assertIn(
             "Commands: /new to reset, q to quit, Ctrl+G for editor",
             output.getvalue(),
         )
+
+    def test_run_chat_propagates_keyboard_interrupt_during_generation_and_closes_runtime(self):
+        fake_runtime = _FakeRuntime(object())
+        with patch("trillim.cli._require_remote_code_opt_in"), patch(
+            "trillim.cli.Runtime",
+            return_value=fake_runtime,
+        ), patch(
+            "trillim.cli.LLM",
+            return_value=object(),
+        ), patch(
+            "trillim.cli._make_chat_key_bindings",
+            return_value=object(),
+        ), patch(
+            "trillim.cli.better_input",
+            side_effect=["hello"],
+        ), patch(
+            "trillim.cli._stream_assistant_turn",
+            side_effect=KeyboardInterrupt(),
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(KeyboardInterrupt):
+                cli._run_chat("Trillim/model", None)
+
+        self.assertTrue(fake_runtime.entered)
+        self.assertTrue(fake_runtime.exited)
+        self.assertIn("assistant: ", output.getvalue())
 
     def test_run_chat_requires_trust_remote_code_for_model_and_adapter_metadata(self):
         with self._patched_model_roots(), patch("trillim.cli.LLM") as llm_ctor:
@@ -802,6 +844,11 @@ class CLITests(unittest.TestCase):
             result = cli.main(["chat", "Trillim/demo"])
         self.assertEqual(result, 1)
         self.assertIn("Error: boom", error.getvalue())
+
+    def test_main_returns_130_for_keyboard_interrupt(self):
+        with patch("trillim.cli._run_chat", side_effect=KeyboardInterrupt()):
+            result = cli.main(["chat", "Trillim/demo"])
+        self.assertEqual(result, 130)
 
 
 class _LocalBundleLike:

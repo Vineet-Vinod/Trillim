@@ -197,13 +197,7 @@ class _ChatSession(ChatSession):
         task = self._active_task
         if task is not None and not task.done():
             if task is asyncio.current_task():
-                event_stream = self._active_event_stream
-                if event_stream is not None:
-                    await event_stream.aclose()
-                self._active_event_stream = None
-                self._consumer_active = False
-                self._active_task = None
-                self._terminated.set()
+                await self._reset_stream_consumer()
                 return
             task.cancel()
         await self._wait_for_termination()

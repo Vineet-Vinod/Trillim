@@ -332,9 +332,14 @@ def _stream_assistant_turn(runtime: Runtime, session, messages_snapshot) -> obje
         print("\nGeneration cancelled.")
         try:
             stream.close()
+        except Exception:
+            pass
         finally:
-            session.close()
-        return runtime.llm.open_session(messages_snapshot)
+            try:
+                session.close()
+            except Exception:
+                pass
+        raise
     except Exception:
         try:
             session.close()
@@ -415,7 +420,7 @@ def _run_chat(
                     break
                 except KeyboardInterrupt:
                     print()
-                    continue
+                    raise
                 stripped = prompt.strip()
                 if not stripped:
                     continue
@@ -431,7 +436,10 @@ def _run_chat(
                 print("assistant: ", end="", flush=True)
                 session = _stream_assistant_turn(runtime, session, snapshot)
         finally:
-            session.close()
+            try:
+                session.close()
+            except Exception:
+                pass
     return 0
 
 
@@ -581,6 +589,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command]()
+    except KeyboardInterrupt:
+        return 130
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
