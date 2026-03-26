@@ -97,6 +97,24 @@ def _warn_on_trillim_config(path: Path) -> None:
         )
 
 
+def _require_remote_code_opt_in(store_id: str, *, label: str, trust_remote_code: bool) -> None:
+    if trust_remote_code:
+        return
+    bundle_path = _model_store.resolve_existing_store_id(store_id, error_type=RuntimeError)
+    config_path = bundle_path / "trillim_config.json"
+    if not config_path.is_file():
+        return
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict) or not bool(payload.get("remote_code", False)):
+        return
+    raise RuntimeError(
+        f"{label} '{store_id}' requires trust_remote_code. Re-run with --trust-remote-code."
+    )
+
+
 def _pull_model(model_id: str, *, revision: str | None, force: bool) -> Path:
     normalized = _validate_pull_id(model_id)
     local_dir = _model_store.store_path_for_id(normalized, error_type=RuntimeError)
@@ -351,11 +369,28 @@ def _make_chat_key_bindings() -> KeyBindings:
     return kb
 
 
-def _run_chat(model_id: str, adapter_id: str | None) -> int:
+def _run_chat(
+    model_id: str,
+    adapter_id: str | None,
+    *,
+    trust_remote_code: bool = False,
+) -> int:
+    _require_remote_code_opt_in(
+        model_id,
+        label="Model",
+        trust_remote_code=trust_remote_code,
+    )
+    if adapter_id is not None:
+        _require_remote_code_opt_in(
+            adapter_id,
+            label="Adapter",
+            trust_remote_code=trust_remote_code,
+        )
     runtime = Runtime(
         LLM(
             model_id,
             lora_dir=adapter_id,
+            trust_remote_code=trust_remote_code,
         )
     )
     with runtime:
@@ -394,10 +429,20 @@ def _run_chat(model_id: str, adapter_id: str | None) -> int:
     return 0
 
 
-def _run_serve(model_id: str, *, voice: bool) -> int:
+def _run_serve(
+    model_id: str,
+    *,
+    voice: bool,
+    trust_remote_code: bool = False,
+) -> int:
+    _require_remote_code_opt_in(
+        model_id,
+        label="Model",
+        trust_remote_code=trust_remote_code,
+    )
     if voice:
         _preflight_voice_dependencies()
-    llm = LLM(model_id)
+    llm = LLM(model_id, trust_remote_code=trust_remote_code)
     components = [llm]
     if voice:
         components.extend([STT(), TTS()])
@@ -472,6 +517,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="Optional store-qualified adapter ID (Trillim/<name> or Local/<name>)",
     )
+    chat_parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow loading custom tokenizer/config code referenced by the bundle",
+    )
 
     serve_parser = subparsers.add_parser("serve", help="Start the demo API server")
     serve_parser.add_argument(
@@ -481,6 +531,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--voice",
         action="store_true",
         help="Enable STT and TTS components",
+    )
+    serve_parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow loading custom tokenizer/config code referenced by the bundle",
     )
 
     quantize_parser = subparsers.add_parser(
@@ -506,8 +561,16 @@ def main(argv: list[str] | None = None) -> int:
         "pull": lambda: _run_pull_command(args),
         "list": _run_list_command,
         "models": _run_models_command,
-        "chat": lambda: _run_chat(args.model_dir, args.adapter_dir),
-        "serve": lambda: _run_serve(args.model_dir, voice=args.voice),
+        "chat": lambda: _run_chat(
+            args.model_dir,
+            args.adapter_dir,
+            trust_remote_code=args.trust_remote_code,
+        ),
+        "serve": lambda: _run_serve(
+            args.model_dir,
+            voice=args.voice,
+            trust_remote_code=args.trust_remote_code,
+        ),
         "quantize": lambda: _run_quantize_command(args),
     }
     try:

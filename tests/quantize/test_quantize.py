@@ -672,6 +672,8 @@ class QuantizeTests(unittest.TestCase):
             self.assertEqual(adapter_metadata["format_version"], CURRENT_FORMAT_VERSION)
             self.assertEqual(model_metadata["type"], "model")
             self.assertEqual(adapter_metadata["type"], "lora_adapter")
+            self.assertEqual(model_metadata["remote_code"], True)
+            self.assertEqual(adapter_metadata["remote_code"], False)
 
     def test_prepare_output_target_prompts_dedups_and_recovers(self):
         with patched_model_store() as root:

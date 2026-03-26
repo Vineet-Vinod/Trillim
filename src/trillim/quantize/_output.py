@@ -155,6 +155,7 @@ def write_model_metadata(
         "architecture": config.arch_name,
         "platforms": list(_SUPPORTED_PLATFORMS),
         "base_model_config_hash": compute_base_model_config_hash(model_dir),
+        "remote_code": _has_remote_code_references(model_dir),
     }
     _write_json(output_dir / "trillim_config.json", payload)
 
@@ -180,6 +181,7 @@ def write_adapter_metadata(
         "architecture": config.arch_name,
         "platforms": list(_SUPPORTED_PLATFORMS),
         "base_model_config_hash": compute_base_model_config_hash(model_dir),
+        "remote_code": _has_remote_code_references(adapter_dir),
     }
     _write_json(output_dir / "trillim_config.json", payload)
 
@@ -295,6 +297,10 @@ def _collect_remote_code_files(model_dir: Path) -> list[Path]:
                 )
             )
     return collected
+
+
+def _has_remote_code_references(model_dir: Path) -> bool:
+    return bool(_collect_remote_code_class_refs(_load_remote_code_metadata(model_dir)))
 
 
 def _load_remote_code_metadata(model_dir: Path) -> dict[str, dict | None]:

@@ -172,6 +172,23 @@ class CLITests(unittest.TestCase):
                 cli._warn_on_trillim_config(root)
         self.assertEqual(output.getvalue(), "")
 
+    def test_require_remote_code_opt_in_ignores_missing_and_invalid_metadata(self):
+        with self._patched_model_roots():
+            model = cli._model_store.LOCAL_ROOT / "model"
+            model.mkdir(parents=True)
+            cli._require_remote_code_opt_in(
+                "Local/model",
+                label="Model",
+                trust_remote_code=False,
+            )
+
+            (model / "trillim_config.json").write_text("{", encoding="utf-8")
+            cli._require_remote_code_opt_in(
+                "Local/model",
+                label="Model",
+                trust_remote_code=False,
+            )
+
     def test_pull_model_reuses_existing_directory_without_force(self):
         with self._patched_model_roots():
             existing = cli._model_store.DOWNLOADED_ROOT / "demo"
@@ -505,10 +522,13 @@ class CLITests(unittest.TestCase):
 
     def test_run_chat_supports_reset_prompt_and_quit(self):
         fake_runtime = _FakeRuntime(object())
-        with patch("trillim.cli.Runtime", return_value=fake_runtime), patch(
+        with patch("trillim.cli._require_remote_code_opt_in") as require_remote_code, patch(
+            "trillim.cli.Runtime",
+            return_value=fake_runtime,
+        ), patch(
             "trillim.cli.LLM",
             return_value=object(),
-        ), patch(
+        ) as llm_ctor, patch(
             "trillim.cli._make_chat_key_bindings",
             return_value="bindings",
         ), patch(
@@ -522,6 +542,12 @@ class CLITests(unittest.TestCase):
             with redirect_stdout(output):
                 result = cli._run_chat("Trillim/model", "Local/adapter")
         self.assertEqual(result, 0)
+        self.assertEqual(require_remote_code.call_count, 2)
+        llm_ctor.assert_called_once_with(
+            "Trillim/model",
+            lora_dir="Local/adapter",
+            trust_remote_code=False,
+        )
         self.assertEqual(fake_runtime.llm.opened_messages, [(), ()])
         self.assertEqual(stream_turn.call_count, 1)
         self.assertEqual(
@@ -537,7 +563,10 @@ class CLITests(unittest.TestCase):
 
     def test_run_chat_ignores_blank_prompt(self):
         fake_runtime = _FakeRuntime(object())
-        with patch("trillim.cli.Runtime", return_value=fake_runtime), patch(
+        with patch("trillim.cli._require_remote_code_opt_in"), patch(
+            "trillim.cli.Runtime",
+            return_value=fake_runtime,
+        ), patch(
             "trillim.cli.LLM",
             return_value=object(),
         ), patch(
@@ -557,7 +586,10 @@ class CLITests(unittest.TestCase):
 
     def test_run_chat_handles_keyboard_interrupt_and_eof_at_prompt(self):
         fake_runtime = _FakeRuntime(object())
-        with patch("trillim.cli.Runtime", return_value=fake_runtime), patch(
+        with patch("trillim.cli._require_remote_code_opt_in"), patch(
+            "trillim.cli.Runtime",
+            return_value=fake_runtime,
+        ), patch(
             "trillim.cli.LLM",
             return_value=object(),
         ), patch(
@@ -576,27 +608,76 @@ class CLITests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_run_chat_requires_trust_remote_code_for_model_and_adapter_metadata(self):
+        with self._patched_model_roots(), patch("trillim.cli.LLM") as llm_ctor:
+            model = cli._model_store.LOCAL_ROOT / "model"
+            adapter = cli._model_store.LOCAL_ROOT / "adapter"
+            write_model_bundle(model)
+            write_adapter_bundle(adapter, model_root=model)
+            model_metadata = json.loads((model / "trillim_config.json").read_text(encoding="utf-8"))
+            model_metadata["remote_code"] = True
+            (model / "trillim_config.json").write_text(json.dumps(model_metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Model 'Local/model' requires trust_remote_code"):
+                cli._run_chat("Local/model", None)
+
+            model_metadata["remote_code"] = False
+            (model / "trillim_config.json").write_text(json.dumps(model_metadata), encoding="utf-8")
+            adapter_metadata = json.loads((adapter / "trillim_config.json").read_text(encoding="utf-8"))
+            adapter_metadata["remote_code"] = True
+            (adapter / "trillim_config.json").write_text(json.dumps(adapter_metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Adapter 'Local/adapter' requires trust_remote_code"):
+                cli._run_chat("Local/model", "Local/adapter")
+
+        llm_ctor.assert_not_called()
+
+    def test_run_chat_passes_trust_remote_code_to_llm(self):
+        fake_runtime = _FakeRuntime(object())
+        with patch("trillim.cli.Runtime", return_value=fake_runtime), patch(
+            "trillim.cli.LLM",
+            return_value=object(),
+        ) as llm_ctor, patch(
+            "trillim.cli._make_chat_key_bindings",
+            return_value=object(),
+        ), patch(
+            "trillim.cli.better_input",
+            side_effect=["q"],
+        ):
+            result = cli._run_chat("Trillim/model", None, trust_remote_code=True)
+
+        self.assertEqual(result, 0)
+        llm_ctor.assert_called_once_with(
+            "Trillim/model",
+            lora_dir=None,
+            trust_remote_code=True,
+        )
+
     def test_run_serve_builds_server_without_voice_by_default(self):
         server = SimpleNamespace(run=lambda **kwargs: kwargs)
         llm = SimpleNamespace()
-        with patch("trillim.cli.LLM", return_value=llm) as llm_ctor, patch(
+        with patch("trillim.cli._require_remote_code_opt_in"), patch(
+            "trillim.cli.LLM",
+            return_value=llm,
+        ) as llm_ctor, patch(
             "trillim.cli.Server",
             return_value=server,
         ) as server_ctor:
             result = cli._run_serve("Trillim/model", voice=False)
         self.assertEqual(result, 0)
-        llm_ctor.assert_called_once_with("Trillim/model")
+        llm_ctor.assert_called_once_with("Trillim/model", trust_remote_code=False)
         self.assertEqual(server_ctor.call_args.args, (llm,))
         self.assertEqual(server_ctor.call_args.kwargs["allow_hot_swap"], False)
 
     def test_run_serve_preflights_voice_dependencies_and_adds_voice_components(self):
         server = SimpleNamespace(run=lambda **kwargs: kwargs)
         llm = SimpleNamespace()
-        with patch("trillim.cli._preflight_voice_dependencies",
+        with patch("trillim.cli._require_remote_code_opt_in"), patch(
+            "trillim.cli._preflight_voice_dependencies",
         ) as preflight, patch(
             "trillim.cli.LLM",
             return_value=llm,
-        ), patch(
+        ) as llm_ctor, patch(
             "trillim.cli.STT",
             return_value="stt",
         ) as stt_ctor, patch(
@@ -609,10 +690,24 @@ class CLITests(unittest.TestCase):
             result = cli._run_serve("Trillim/model", voice=True)
         self.assertEqual(result, 0)
         preflight.assert_called_once_with()
+        llm_ctor.assert_called_once_with("Trillim/model", trust_remote_code=False)
         self.assertEqual(server_ctor.call_args.kwargs["allow_hot_swap"], False)
         stt_ctor.assert_called_once_with()
         tts_ctor.assert_called_once_with()
         self.assertEqual(server_ctor.call_args.args, (llm, "stt", "tts"))
+
+    def test_run_serve_requires_trust_remote_code_for_model_metadata(self):
+        with self._patched_model_roots(), patch("trillim.cli.LLM") as llm_ctor:
+            model = cli._model_store.LOCAL_ROOT / "model"
+            write_model_bundle(model)
+            metadata = json.loads((model / "trillim_config.json").read_text(encoding="utf-8"))
+            metadata["remote_code"] = True
+            (model / "trillim_config.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Model 'Local/model' requires trust_remote_code"):
+                cli._run_serve("Local/model", voice=False)
+
+        llm_ctor.assert_not_called()
 
     def test_run_quantize_command_invokes_quantizer(self):
         args = SimpleNamespace(model_dir="/tmp/model", adapter_dir="/tmp/adapter")
@@ -645,10 +740,12 @@ class CLITests(unittest.TestCase):
 
     def test_build_parser_parses_voice_and_adapter_positionals(self):
         parser = cli.build_parser()
-        args = parser.parse_args(["serve", "Trillim/model", "--voice"])
+        args = parser.parse_args(["serve", "Trillim/model", "--voice", "--trust-remote-code"])
         self.assertTrue(args.voice)
-        args = parser.parse_args(["chat", "Trillim/model", "Local/adapter"])
+        self.assertTrue(args.trust_remote_code)
+        args = parser.parse_args(["chat", "Trillim/model", "Local/adapter", "--trust-remote-code"])
         self.assertEqual(args.adapter_dir, "Local/adapter")
+        self.assertTrue(args.trust_remote_code)
         args = parser.parse_args(["quantize", "/tmp/model", "/tmp/adapter"])
         self.assertEqual(args.model_dir, "/tmp/model")
         self.assertEqual(args.adapter_dir, "/tmp/adapter")
@@ -672,10 +769,18 @@ class CLITests(unittest.TestCase):
             run_models.assert_called_once_with()
         with patch("trillim.cli._run_chat", return_value=7) as run_chat:
             self.assertEqual(cli.main(["chat", "Trillim/demo"]), 7)
-            run_chat.assert_called_once_with("Trillim/demo", None)
+            run_chat.assert_called_once_with(
+                "Trillim/demo",
+                None,
+                trust_remote_code=False,
+            )
         with patch("trillim.cli._run_serve", return_value=9) as run_serve:
             self.assertEqual(cli.main(["serve", "Trillim/demo"]), 9)
-            run_serve.assert_called_once_with("Trillim/demo", voice=False)
+            run_serve.assert_called_once_with(
+                "Trillim/demo",
+                voice=False,
+                trust_remote_code=False,
+            )
         with patch("trillim.cli._run_quantize_command", return_value=1) as run_quantize:
             self.assertEqual(cli.main(["quantize", "/tmp/model"]), 1)
             run_quantize.assert_called_once()
