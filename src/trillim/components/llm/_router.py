@@ -251,29 +251,29 @@ def build_router(llm, *, allow_hot_swap: bool) -> APIRouter:
 
     @router.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        info = llm.model_info()
         payload = await _read_json_body(request, REQUEST_BODY_LIMIT_BYTES)
         try:
+            info = llm.model_info()
             chat_request = validate_chat_request(
                 payload,
                 active_model_name=info.name,
             )
             if chat_request.stream:
                 return _ChatStreamResponse(llm, chat_request)
+            response_model_name = info.name
             text, usage = await llm._collect_chat(
                 _request_messages(chat_request),
                 **_sampling_kwargs(chat_request),
             )
         except Exception as exc:
             raise _as_http_error(exc) from exc
-        model_info = llm.model_info()
         response_id = _response_id()
         created = int(time.time())
         return {
             "id": response_id,
             "object": "chat.completion",
             "created": created,
-            "model": model_info.name,
+            "model": response_model_name,
             "choices": [
                 {
                     "index": 0,

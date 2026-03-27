@@ -12,9 +12,9 @@ from unittest.mock import patch
 
 from trillim.components.stt._config import OwnedAudioInput
 from trillim.components.stt._config import SourceFileSnapshot
-from trillim.components.stt.public import STT
+from trillim.components.stt.public import STT, _bounded_request_stream
 from trillim.errors import AdmissionRejectedError, InvalidRequestError, ProgressTimeoutError
-from tests.components.stt.support import list_spool_files, make_faster_whisper_stub
+from tests.components.stt.support import FakeRequest, list_spool_files, make_faster_whisper_stub
 
 
 class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
@@ -208,6 +208,64 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.assertRaisesRegex(ProgressTimeoutError, "timed out"):
                 await stt.transcribe_bytes(b"abc")
+
+    async def test_http_upload_timeout_surfaces_and_releases_the_admission_slot(self):
+        stt = await self._start_stt()
+
+        class _SlowRequest(FakeRequest):
+            async def stream(self):
+                self.stream_called = True
+                await asyncio.sleep(0.02)
+                yield b"abc"
+
+        request = _SlowRequest(headers={"content-type": "audio/wav"})
+        with patch("trillim.components.stt.public.UPLOAD_PROGRESS_TIMEOUT_SECONDS", 0.01), patch(
+            "trillim.components.stt.public.TOTAL_UPLOAD_TIMEOUT_SECONDS",
+            1.0,
+        ):
+            with self.assertRaisesRegex(ProgressTimeoutError, "audio upload timed out"):
+                await stt._transcribe_http_request(request)
+        self.assertTrue(request.stream_called)
+        self.assertEqual(list_spool_files(self.spool_dir), [])
+        lease = await stt._admission.acquire()
+        await lease.release()
+
+    async def test_bounded_request_stream_enforces_total_upload_timeout(self):
+        class _TricklingRequest(FakeRequest):
+            async def stream(self):
+                self.stream_called = True
+                while True:
+                    await asyncio.sleep(0.004)
+                    yield b"a"
+
+        request = _TricklingRequest(headers={"content-type": "audio/wav"})
+        with patch("trillim.components.stt.public.UPLOAD_PROGRESS_TIMEOUT_SECONDS", 1.0), patch(
+            "trillim.components.stt.public.TOTAL_UPLOAD_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            with self.assertRaisesRegex(ProgressTimeoutError, "audio upload timed out"):
+                [chunk async for chunk in _bounded_request_stream(request)]
+        self.assertTrue(request.stream_called)
+
+    async def test_bounded_request_stream_raises_immediately_when_deadline_is_already_spent(self):
+        request = FakeRequest(headers={"content-type": "audio/wav"})
+
+        class _Loop:
+            def __init__(self) -> None:
+                self._times = iter([0.0, 2.0])
+
+            def time(self) -> float:
+                return next(self._times)
+
+        with patch("trillim.components.stt.public.asyncio.get_running_loop", return_value=_Loop()), patch(
+            "trillim.components.stt.public.UPLOAD_PROGRESS_TIMEOUT_SECONDS",
+            1.0,
+        ), patch(
+            "trillim.components.stt.public.TOTAL_UPLOAD_TIMEOUT_SECONDS",
+            1.0,
+        ):
+            with self.assertRaisesRegex(ProgressTimeoutError, "audio upload timed out"):
+                [chunk async for chunk in _bounded_request_stream(request)]
 
     async def test_cleanup_failure_does_not_mask_transcription_error(self):
         stt = await self._start_stt()

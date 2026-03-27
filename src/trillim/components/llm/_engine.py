@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,10 +317,16 @@ async def _read_stderr(process: asyncio.subprocess.Process) -> str:
 
 
 def _bundled_binary_path() -> str:
-    bundled = Path(__file__).resolve().parents[2] / "_bin" / "trillim-inference"
-    if not bundled.is_file():
-        raise FileNotFoundError(f"Missing bundled LLM inference binary: {bundled}")
-    return str(bundled)
+    suffix = ".exe" if os.name =="nt" else ""
+    bin_dir = Path(__file__).resolve().parents[2] / "_bin"
+    bundled = bin_dir / f"trillim-inference{suffix}"
+    if bundled.is_file():
+        return str(bundled)
+    if suffix:
+        fallback = bin_dir / "trillim-inference"
+        if fallback.is_file():
+            return str(fallback)
+    raise FileNotFoundError(f"Missing bundled LLM inference binary: {bundled}")
 
 
 def _build_init_block(model: ModelRuntimeConfig, init_config: InitConfig) -> str:

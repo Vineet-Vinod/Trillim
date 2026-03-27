@@ -12,6 +12,10 @@ from fastapi import APIRouter, Request
 
 from trillim.components import Component
 from trillim.components.stt._admission import TranscriptionAdmission
+from trillim.components.stt._limits import (
+    TOTAL_UPLOAD_TIMEOUT_SECONDS,
+    UPLOAD_PROGRESS_TIMEOUT_SECONDS,
+)
 from trillim.components.stt._router import build_router
 from trillim.components.stt._spool import copy_source_file, spool_audio_bytes, spool_request_stream
 from trillim.components.stt._validation import (
@@ -22,7 +26,31 @@ from trillim.components.stt._validation import (
     validate_source_file,
 )
 from trillim.components.stt._worker import transcribe_owned_audio_file
+from trillim.errors import ProgressTimeoutError
 from trillim.utils.filesystem import unlink_if_exists
+
+
+async def _bounded_request_stream(request: Request):
+    stream = request.stream().__aiter__()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + UPLOAD_PROGRESS_TIMEOUT_SECONDS
+    while True:
+        now = loop.time()
+        remaining = min(deadline - now, started + TOTAL_UPLOAD_TIMEOUT_SECONDS - now)
+        if remaining <= 0:
+            raise ProgressTimeoutError("audio upload timed out")
+        try:
+            async with asyncio.timeout(remaining):
+                chunk = await anext(stream)
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            raise ProgressTimeoutError("audio upload timed out") from exc
+        if not chunk:
+            continue
+        deadline = loop.time() + UPLOAD_PROGRESS_TIMEOUT_SECONDS
+        yield chunk
 
 
 class STT(Component):
@@ -94,7 +122,10 @@ class STT(Component):
             language=request.query_params.get("language"),
         )
         return await self._run_transcription(
-            lambda: spool_request_stream(request.stream(), spool_dir=self._spool_dir),
+            lambda: spool_request_stream(
+                _bounded_request_stream(request),
+                spool_dir=self._spool_dir,
+            ),
             language=validated_request.language,
         )
 

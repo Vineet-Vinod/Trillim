@@ -184,7 +184,7 @@ class LLMRouterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.json()["detail"], "LLM is busy")
 
-    def test_chat_completions_reports_current_model_after_swap(self):
+    def test_chat_completions_reports_the_model_that_generated_the_response(self):
         models = [
             make_runtime_model(Path("/tmp/fake"), name="fake"),
             make_runtime_model(Path("/tmp/next"), name="next"),
@@ -213,7 +213,45 @@ class LLMRouterTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["model"], "fake")
+
+    def test_chat_completions_uses_the_model_active_after_body_read(self):
+        models = [
+            make_runtime_model(Path("/tmp/fake"), name="fake"),
+            make_runtime_model(Path("/tmp/next"), name="next"),
+        ]
+        model_iter = iter(models)
+        self._ensure_store_dir("Trillim/fake")
+        self._ensure_store_dir("Trillim/next")
+        llm = LLM(
+            "Trillim/fake",
+            _model_validator=lambda _path: next(model_iter),
+            _tokenizer_loader=lambda *_args, **_kwargs: FakeTokenizer(),
+            _engine_factory=FakeEngineFactory(responses=["unused"]),
+        )
+        server = Server(llm, allow_hot_swap=True)
+
+        async def delayed_read_json_body(*_args, **_kwargs):
+            await llm.swap_model("Trillim/next")
+            return {"messages": [{"role": "user", "content": "Say hi"}]}
+
+        async def collect_with_active_model(*_args, **_kwargs):
+            model_name = llm.model_info().name
+            return model_name, ChatUsage(1, 1, 2, 0)
+
+        llm._collect_chat = collect_with_active_model
+
+        with patch.object(llm_router, "_read_json_body", delayed_read_json_body):
+            with TestClient(server.app) as client:
+                response = client.post(
+                    "/v1/chat/completions",
+                    content=b"{}",
+                    headers={"content-type": "application/json"},
+                )
+
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["model"], "next")
+        self.assertEqual(response.json()["choices"][0]["message"]["content"], "next")
 
     def test_chat_completions_streams_sse_chunks(self):
         with TestClient(self._make_server(responses=["hi"]).app) as client:

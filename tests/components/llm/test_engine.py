@@ -17,6 +17,7 @@ from trillim.components.llm._engine import (
     EngineProtocolError,
     InferenceEngine,
     _PromptCache,
+    _bundled_binary_path,
     _first_protocol_line,
     _read_stderr,
 )
@@ -71,8 +72,16 @@ class _FakeProcess:
 
 
 class EngineTests(unittest.IsolatedAsyncioTestCase):
-    def _expected_binary_path(self) -> str:
-        return str(Path(engine_module.__file__).resolve().parents[2] / "_bin" / "trillim-inference")
+    def _expected_binary_path(self, *, os_name: str | None = None, suffix: str | None = None) -> str:
+        resolved_os_name = engine_module.os.name if os_name is None else os_name
+        resolved_suffix = ".exe" if resolved_os_name == "nt" else ""
+        if suffix is not None:
+            resolved_suffix = suffix
+        return str(
+            Path(engine_module.__file__).resolve().parents[2]
+            / "_bin"
+            / f"trillim-inference{resolved_suffix}"
+        )
 
     def _make_engine(self) -> InferenceEngine:
         return InferenceEngine(
@@ -89,6 +98,45 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(engine_module.Path, "is_file", return_value=False):
             with self.assertRaisesRegex(FileNotFoundError, "Missing bundled LLM inference binary"):
                 self._make_engine()
+
+    def test_bundled_binary_path_uses_windows_suffix_and_fallback(self):
+        exe_path = Path(self._expected_binary_path(os_name="nt", suffix=".exe"))
+        fallback_path = Path(self._expected_binary_path(os_name="nt", suffix=""))
+
+        with patch.object(engine_module, "os", SimpleNamespace(name="nt")), patch.object(
+            engine_module.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path == exe_path,
+        ):
+            self.assertEqual(_bundled_binary_path(), str(exe_path))
+
+        with patch.object(engine_module, "os", SimpleNamespace(name="nt")), patch.object(
+            engine_module.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: path == fallback_path,
+        ):
+            self.assertEqual(_bundled_binary_path(), str(fallback_path))
+
+    def test_bundled_binary_path_covers_windows_missing_fallback_and_non_windows_recheck(self):
+        with patch.object(engine_module, "os", SimpleNamespace(name="nt")), patch.object(
+            engine_module.Path,
+            "is_file",
+            autospec=True,
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "Missing bundled LLM inference binary"):
+                _bundled_binary_path()
+
+        bundled_path = Path(self._expected_binary_path(os_name="posix"))
+        with patch.object(engine_module, "os", SimpleNamespace(name="posix")), patch.object(
+            engine_module.Path,
+            "is_file",
+            autospec=True,
+            return_value=True,
+        ):
+            self.assertEqual(_bundled_binary_path(), str(bundled_path))
 
     async def test_start_launches_process_and_writes_init_block(self):
         engine = self._make_engine()
