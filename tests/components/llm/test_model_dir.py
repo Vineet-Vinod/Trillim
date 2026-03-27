@@ -19,6 +19,7 @@ from trillim.components.llm._model_dir import (
     _collect_eos_tokens,
     _collect_remote_code_class_refs,
     _collect_remote_code_files,
+    _extract_auto_map_value,
     _extract_auto_map_refs,
     _extract_dimensions,
     _filesystem_device,
@@ -29,6 +30,8 @@ from trillim.components.llm._model_dir import (
     _materialize_file,
     _materialize_required_file,
     _merge_json_payloads,
+    _restore_base_auto_map_entry,
+    _restore_base_tokenizer_loader_fields,
     _module_name_to_relative_path,
     _parse_remote_code_module_path,
     _relative_import_module_names,
@@ -40,6 +43,7 @@ from trillim.components.llm._model_dir import (
     validate_lora_dir,
     validate_model_dir,
 )
+from trillim.components.llm._tokenizer import load_tokenizer
 from trillim.errors import ModelValidationError
 from tests.components.llm.support import model_dir, write_adapter_bundle
 from tests.components.llm.support import write_model_bundle
@@ -552,6 +556,316 @@ class ModelDirectoryTests(unittest.TestCase):
                 self.assertEqual(merged["nested"]["adapter"], "win")
             finally:
                 runtime_files.cleanup()
+
+    def test_prepare_runtime_files_preserves_base_loader_fields_without_explicit_adapter_override(self):
+        with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
+            from tokenizers import Tokenizer
+            from tokenizers.models import WordLevel
+            from tokenizers.pre_tokenizers import Whitespace
+            from transformers import PreTrainedTokenizerFast
+
+            adapter = Path(temp_dir) / "adapter"
+            write_adapter_bundle(adapter, model_root=root)
+            backend = Tokenizer(
+                WordLevel({"<unk>": 0, "<pad>": 1, "hello": 2}, unk_token="<unk>")
+            )
+            backend.pre_tokenizer = Whitespace()
+            PreTrainedTokenizerFast(
+                tokenizer_object=backend,
+                unk_token="<unk>",
+                pad_token="<pad>",
+            ).save_pretrained(str(root))
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "architectures": ["LlamaForCausalLM"],
+                        "hidden_size": 128,
+                        "intermediate_size": 256,
+                        "num_attention_heads": 4,
+                        "num_hidden_layers": 2,
+                        "num_key_value_heads": 4,
+                        "vocab_size": 256,
+                        "max_position_embeddings": 512,
+                        "hidden_act": "silu",
+                        "eos_token_id": 2,
+                        "tokenizer_class": "BaseConfigTokenizer",
+                        "auto_map": {"AutoConfig": "config_mod.BaseConfig"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (adapter / "config.json").write_text(
+                json.dumps(
+                    {
+                        "eos_token_id": 5,
+                        "tokenizer_class": "TokenizersBackend",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "tokenizer_class": "PreTrainedTokenizerFast",
+                        "chat_template": "base-template",
+                        "unk_token": "<unk>",
+                        "pad_token": "<pad>",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (adapter / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "tokenizer_class": "TokenizersBackend",
+                        "chat_template": "adapter-template",
+                        "pad_token": "<pad>",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_files = prepare_runtime_files(
+                InitConfig(model_dir=root, lora_dir=adapter),
+                trust_remote_code=False,
+            )
+            overlay_path = runtime_files.metadata_dir
+            try:
+                merged_config = json.loads((overlay_path / "config.json").read_text(encoding="utf-8"))
+                merged_tokenizer_config = json.loads(
+                    (overlay_path / "tokenizer_config.json").read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(merged_config["eos_token_id"], 5)
+                self.assertEqual(merged_config["tokenizer_class"], "BaseConfigTokenizer")
+                self.assertEqual(
+                    merged_config["auto_map"],
+                    {"AutoConfig": "config_mod.BaseConfig"},
+                )
+                self.assertEqual(
+                    merged_tokenizer_config["tokenizer_class"],
+                    "PreTrainedTokenizerFast",
+                )
+                self.assertEqual(merged_tokenizer_config["chat_template"], "adapter-template")
+                self.assertEqual(merged_tokenizer_config["pad_token"], "<pad>")
+
+                tokenizer = load_tokenizer(overlay_path, trust_remote_code=False)
+
+                self.assertTrue(callable(getattr(tokenizer, "encode", None)))
+                self.assertTrue(callable(getattr(tokenizer, "decode", None)))
+            finally:
+                runtime_files.cleanup()
+
+    def test_prepare_runtime_files_drops_implicit_adapter_loader_fields_when_base_has_none(self):
+        with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
+            adapter = Path(temp_dir) / "adapter"
+            write_adapter_bundle(adapter, model_root=root)
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "architectures": ["LlamaForCausalLM"],
+                        "hidden_size": 128,
+                        "intermediate_size": 256,
+                        "num_attention_heads": 4,
+                        "num_hidden_layers": 2,
+                        "num_key_value_heads": 4,
+                        "vocab_size": 256,
+                        "max_position_embeddings": 512,
+                        "hidden_act": "silu",
+                        "eos_token_id": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (adapter / "config.json").write_text(
+                json.dumps(
+                    {
+                        "eos_token_id": 5,
+                        "tokenizer_class": "TokenizersBackend",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "tokenizer_config.json").write_text(
+                json.dumps({"chat_template": "base-template"}),
+                encoding="utf-8",
+            )
+            (adapter / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "tokenizer_class": "TokenizersBackend",
+                        "chat_template": "adapter-template",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_files = prepare_runtime_files(
+                InitConfig(model_dir=root, lora_dir=adapter),
+                trust_remote_code=False,
+            )
+            overlay_path = runtime_files.metadata_dir
+            try:
+                merged_config = json.loads((overlay_path / "config.json").read_text(encoding="utf-8"))
+                merged_tokenizer_config = json.loads(
+                    (overlay_path / "tokenizer_config.json").read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(merged_config["eos_token_id"], 5)
+                self.assertNotIn("tokenizer_class", merged_config)
+                self.assertEqual(merged_tokenizer_config["chat_template"], "adapter-template")
+                self.assertNotIn("tokenizer_class", merged_tokenizer_config)
+            finally:
+                runtime_files.cleanup()
+
+    def test_prepare_runtime_files_preserves_explicit_adapter_auto_tokenizer_override(self):
+        with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:
+            adapter = Path(temp_dir) / "adapter"
+            write_adapter_bundle(adapter, model_root=root)
+            (root / "tokenizer_config.json").write_text(
+                json.dumps({"tokenizer_class": "PreTrainedTokenizerFast"}),
+                encoding="utf-8",
+            )
+            (adapter / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "tokenizer_class": "AdapterTokenizer",
+                        "auto_map": ["tokenization_adapter.AdapterTokenizer", None],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_files = prepare_runtime_files(
+                InitConfig(model_dir=root, lora_dir=adapter),
+                trust_remote_code=False,
+            )
+            overlay_path = runtime_files.metadata_dir
+            try:
+                merged = json.loads(
+                    (overlay_path / "tokenizer_config.json").read_text(encoding="utf-8")
+                )
+
+                self.assertEqual(merged["tokenizer_class"], "AdapterTokenizer")
+                self.assertEqual(
+                    merged["auto_map"],
+                    ["tokenization_adapter.AdapterTokenizer", None],
+                )
+            finally:
+                runtime_files.cleanup()
+
+    def test_restore_base_tokenizer_loader_fields_drops_unowned_loader_state(self):
+        merged = {
+            "tokenizer_class": "AdapterTokenizer",
+            "auto_map": ["tokenization_adapter.AdapterTokenizer", None],
+        }
+
+        _restore_base_tokenizer_loader_fields(merged, {"tokenizer_class": ""})
+
+        self.assertNotIn("tokenizer_class", merged)
+        self.assertNotIn("auto_map", merged)
+
+        merged = {
+            "tokenizer_class": "AdapterTokenizer",
+            "auto_map": ["tokenization_adapter.AdapterTokenizer", None],
+        }
+        _restore_base_tokenizer_loader_fields(merged, None)
+        self.assertNotIn("tokenizer_class", merged)
+        self.assertNotIn("auto_map", merged)
+
+    def test_restore_base_auto_map_entry_covers_list_and_dict_cleanup_paths(self):
+        merged = {"auto_map": {"AutoTokenizer": "adapter.Tokenizer"}}
+        _restore_base_auto_map_entry(
+            merged,
+            {"auto_map": ["base.Tokenizer", None]},
+            key="AutoTokenizer",
+        )
+        self.assertEqual(merged["auto_map"], ["base.Tokenizer", None])
+
+        merged = {"auto_map": {"AutoTokenizer": "adapter.Tokenizer", "Other": "keep"}}
+        _restore_base_auto_map_entry(
+            merged,
+            {"auto_map": {"AutoConfig": "config_mod.Config"}},
+            key="AutoTokenizer",
+        )
+        self.assertEqual(merged["auto_map"], {"Other": "keep"})
+
+        merged = {"auto_map": {"AutoTokenizer": "adapter.Tokenizer"}}
+        _restore_base_auto_map_entry(
+            merged,
+            {"auto_map": {"AutoConfig": "config_mod.Config"}},
+            key="AutoTokenizer",
+        )
+        self.assertNotIn("auto_map", merged)
+
+        merged = {"auto_map": {"Other": "keep"}}
+        _restore_base_auto_map_entry(merged, None, key="AutoTokenizer")
+        self.assertEqual(merged["auto_map"], {"Other": "keep"})
+
+        merged = {"auto_map": {"AutoTokenizer": "adapter.Tokenizer"}}
+        _restore_base_auto_map_entry(merged, None, key="AutoTokenizer")
+        self.assertNotIn("auto_map", merged)
+
+        merged = {"auto_map": {"AutoTokenizer": "adapter.Tokenizer", "Other": "keep"}}
+        _restore_base_auto_map_entry(merged, None, key="AutoTokenizer")
+        self.assertEqual(merged["auto_map"], {"Other": "keep"})
+
+        merged = {}
+        _restore_base_auto_map_entry(
+            merged,
+            {
+                "auto_map": {
+                    "AutoTokenizer": ["base.Tokenizer", None],
+                    "AutoConfig": "config_mod.Config",
+                }
+            },
+            key="AutoTokenizer",
+        )
+        self.assertEqual(
+            merged["auto_map"],
+            {
+                "AutoTokenizer": ["base.Tokenizer", None],
+                "AutoConfig": "config_mod.Config",
+            },
+        )
+
+    def test_extract_auto_map_value_handles_invalid_and_sequence_values(self):
+        self.assertEqual(
+            _extract_auto_map_value(None, key="AutoTokenizer"),
+            (None, False, False),
+        )
+        self.assertEqual(
+            _extract_auto_map_value({"auto_map": ["", None]}, key="AutoTokenizer"),
+            (None, False, False),
+        )
+        self.assertEqual(
+            _extract_auto_map_value(
+                {"auto_map": {"AutoTokenizer": ["", None]}},
+                key="AutoTokenizer",
+            ),
+            (None, False, False),
+        )
+        self.assertEqual(
+            _extract_auto_map_value(
+                {"auto_map": {"AutoTokenizer": ("base.Tokenizer", None)}},
+                key="AutoTokenizer",
+            ),
+            (["base.Tokenizer", None], True, False),
+        )
+        self.assertEqual(
+            _extract_auto_map_value(
+                {"auto_map": {"AutoTokenizer": ["base.Tokenizer", None]}},
+                key="AutoTokenizer",
+            ),
+            (["base.Tokenizer", None], True, False),
+        )
+        self.assertEqual(
+            _extract_auto_map_value(
+                {"auto_map": {"AutoTokenizer": "base.Tokenizer"}},
+                key="AutoTokenizer",
+            ),
+            ("base.Tokenizer", True, False),
+        )
 
     def test_prepare_runtime_files_ignores_unused_symlinked_extra_files(self):
         with model_dir() as root, tempfile.TemporaryDirectory() as temp_dir:

@@ -135,12 +135,29 @@ def copy_model_support_files(model_dir: Path, output_dir: Path) -> None:
 
 
 def copy_adapter_support_files(adapter_dir: Path, output_dir: Path) -> None:
+    adapter_config = _load_optional_json(adapter_dir / "config.json")
+    adapter_tokenizer_config = _load_optional_json(adapter_dir / "tokenizer_config.json")
+    adapter_has_explicit_auto_tokenizer = _adapter_declares_auto_tokenizer(
+        adapter_config,
+        adapter_tokenizer_config,
+    )
     for source_path in sorted(adapter_dir.rglob("*")):
         if source_path.is_dir():
             continue
         relative_path = source_path.relative_to(adapter_dir)
         if _should_skip_adapter_path(relative_path):
             continue
+        if relative_path in {Path("config.json"), Path("tokenizer_config.json")}:
+            payload = _load_optional_json(source_path)
+            if payload is not None:
+                _write_json(
+                    output_dir / relative_path,
+                    _sanitize_adapter_tokenizer_loader_fields(
+                        payload,
+                        adapter_has_explicit_auto_tokenizer=adapter_has_explicit_auto_tokenizer,
+                    ),
+                )
+                continue
         _copy_file(source_path, output_dir / relative_path)
 
 
@@ -256,6 +273,7 @@ def _is_complete_staging_dir(path: Path) -> bool:
 
 
 def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -467,6 +485,32 @@ def _extract_auto_map_refs(payload: dict | None, *, key: str) -> list[str]:
     else:
         return []
     return [value for value in values if isinstance(value, str) and value]
+
+
+def _adapter_declares_auto_tokenizer(*payloads: dict | None) -> bool:
+    return any(_extract_auto_map_refs(payload, key="AutoTokenizer") for payload in payloads)
+
+
+def _sanitize_adapter_tokenizer_loader_fields(
+    payload: dict,
+    *,
+    adapter_has_explicit_auto_tokenizer: bool,
+) -> dict:
+    if adapter_has_explicit_auto_tokenizer:
+        return dict(payload)
+    sanitized = dict(payload)
+    sanitized.pop("tokenizer_class", None)
+    auto_map = sanitized.get("auto_map")
+    if isinstance(auto_map, dict):
+        updated_auto_map = dict(auto_map)
+        updated_auto_map.pop("AutoTokenizer", None)
+        if updated_auto_map:
+            sanitized["auto_map"] = updated_auto_map
+        else:
+            sanitized.pop("auto_map", None)
+    elif isinstance(auto_map, (list, tuple)):
+        sanitized.pop("auto_map", None)
+    return sanitized
 
 
 def _parse_remote_code_module_path(class_ref: str) -> Path:

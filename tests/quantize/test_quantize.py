@@ -2257,6 +2257,147 @@ class QuantizeInternalTests(unittest.TestCase):
             mark_complete.assert_called_once()
             publish_staging_dir.assert_called_once()
 
+    def test_copy_adapter_support_files_strips_implicit_tokenizer_loader_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            adapter_dir = root / "adapter"
+            adapter_dir.mkdir()
+            (adapter_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "eos_token_id": 5,
+                        "tokenizer_class": "TokenizersBackend",
+                        "auto_map": {"AutoConfig": "config_mod.Config"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (adapter_dir / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "tokenizer_class": "TokenizersBackend",
+                        "chat_template": "{{ messages }}",
+                        "pad_token": "<pad>",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "adapter-out"
+
+            output.copy_adapter_support_files(adapter_dir, output_dir)
+
+            copied_config = json.loads((output_dir / "config.json").read_text(encoding="utf-8"))
+            copied_tokenizer_config = json.loads(
+                (output_dir / "tokenizer_config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                copied_config,
+                {
+                    "eos_token_id": 5,
+                    "auto_map": {"AutoConfig": "config_mod.Config"},
+                },
+            )
+            self.assertEqual(
+                copied_tokenizer_config,
+                {
+                    "chat_template": "{{ messages }}",
+                    "pad_token": "<pad>",
+                },
+            )
+
+    def test_copy_adapter_support_files_preserves_explicit_auto_tokenizer_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            adapter_dir = root / "adapter"
+            adapter_dir.mkdir()
+            (adapter_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "eos_token_id": 5,
+                        "tokenizer_class": "AdapterTokenizer",
+                        "auto_map": {
+                            "AutoTokenizer": ["tokenization_adapter.AdapterTokenizer", None],
+                            "AutoConfig": "config_mod.Config",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (adapter_dir / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "tokenizer_class": "AdapterTokenizer",
+                        "auto_map": ["tokenization_adapter.AdapterTokenizer", None],
+                        "chat_template": "{{ messages }}",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "adapter-out"
+
+            output.copy_adapter_support_files(adapter_dir, output_dir)
+
+            copied_config = json.loads((output_dir / "config.json").read_text(encoding="utf-8"))
+            copied_tokenizer_config = json.loads(
+                (output_dir / "tokenizer_config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                copied_config,
+                {
+                    "eos_token_id": 5,
+                    "tokenizer_class": "AdapterTokenizer",
+                    "auto_map": {
+                        "AutoTokenizer": ["tokenization_adapter.AdapterTokenizer", None],
+                        "AutoConfig": "config_mod.Config",
+                    },
+                },
+            )
+            self.assertEqual(
+                copied_tokenizer_config,
+                {
+                    "tokenizer_class": "AdapterTokenizer",
+                    "auto_map": ["tokenization_adapter.AdapterTokenizer", None],
+                    "chat_template": "{{ messages }}",
+                },
+            )
+
+    def test_copy_adapter_support_files_copies_non_object_tokenizer_config_verbatim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            adapter_dir = root / "adapter"
+            adapter_dir.mkdir()
+            (adapter_dir / "tokenizer_config.json").write_text("[]", encoding="utf-8")
+            output_dir = root / "adapter-out"
+
+            output.copy_adapter_support_files(adapter_dir, output_dir)
+
+            self.assertEqual(
+                (output_dir / "tokenizer_config.json").read_text(encoding="utf-8"),
+                "[]",
+            )
+
+    def test_sanitize_adapter_tokenizer_loader_fields_removes_empty_auto_map_shapes(self):
+        self.assertEqual(
+            output._sanitize_adapter_tokenizer_loader_fields(
+                {
+                    "tokenizer_class": "AdapterTokenizer",
+                    "auto_map": {"AutoTokenizer": ["tokenization_adapter.AdapterTokenizer", None]},
+                },
+                adapter_has_explicit_auto_tokenizer=False,
+            ),
+            {},
+        )
+        self.assertEqual(
+            output._sanitize_adapter_tokenizer_loader_fields(
+                {
+                    "tokenizer_class": "AdapterTokenizer",
+                    "auto_map": ["tokenization_adapter.AdapterTokenizer", None],
+                },
+                adapter_has_explicit_auto_tokenizer=False,
+            ),
+            {},
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

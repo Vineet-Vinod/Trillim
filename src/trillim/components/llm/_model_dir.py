@@ -542,18 +542,33 @@ def _build_overlay_dir(
 
 
 def _build_overlay_metadata(model_dir: Path, adapter_dir: Path) -> _OverlayMetadata:
+    base_config = _load_required_json_strict(
+        model_dir / "config.json",
+        symlink_message="Model bundle must not use symlinks",
+        transform=_canonicalize_model_config,
+    )
+    adapter_config = _load_optional_json_strict(
+        adapter_dir / "config.json",
+        symlink_message="LoRA directory must not use symlinks",
+        transform=_canonicalize_model_config,
+    )
+    base_tokenizer_config = _load_optional_json_strict(
+        model_dir / "tokenizer_config.json",
+        symlink_message="Model bundle must not use symlinks",
+    )
+    adapter_tokenizer_config = _load_optional_json_strict(
+        adapter_dir / "tokenizer_config.json",
+        symlink_message="LoRA directory must not use symlinks",
+    )
+    adapter_has_explicit_auto_tokenizer = _adapter_declares_auto_tokenizer(
+        adapter_config,
+        adapter_tokenizer_config,
+    )
     return _OverlayMetadata(
-        config=_merge_json_payloads(
-            _load_required_json_strict(
-                model_dir / "config.json",
-                symlink_message="Model bundle must not use symlinks",
-                transform=_canonicalize_model_config,
-            ),
-            _load_optional_json_strict(
-                adapter_dir / "config.json",
-                symlink_message="LoRA directory must not use symlinks",
-                transform=_canonicalize_model_config,
-            ),
+        config=_merge_tokenizer_loader_payloads(
+            base_config,
+            adapter_config,
+            adapter_has_explicit_auto_tokenizer=adapter_has_explicit_auto_tokenizer,
         )
         or {},
         added_tokens=_merge_json_payloads(
@@ -586,15 +601,10 @@ def _build_overlay_metadata(model_dir: Path, adapter_dir: Path) -> _OverlayMetad
                 symlink_message="LoRA directory must not use symlinks",
             ),
         ),
-        tokenizer_config=_merge_json_payloads(
-            _load_optional_json_strict(
-                model_dir / "tokenizer_config.json",
-                symlink_message="Model bundle must not use symlinks",
-            ),
-            _load_optional_json_strict(
-                adapter_dir / "tokenizer_config.json",
-                symlink_message="LoRA directory must not use symlinks",
-            ),
+        tokenizer_config=_merge_tokenizer_loader_payloads(
+            base_tokenizer_config,
+            adapter_tokenizer_config,
+            adapter_has_explicit_auto_tokenizer=adapter_has_explicit_auto_tokenizer,
         ),
     )
 
@@ -714,6 +724,95 @@ def _merge_json_payloads(base: dict | list | None, override: dict | list | None)
         else:
             merged[key] = value
     return merged
+
+
+def _adapter_declares_auto_tokenizer(*payloads: dict | None) -> bool:
+    return any(_extract_auto_map_refs(payload, key="AutoTokenizer") for payload in payloads)
+
+
+def _merge_tokenizer_loader_payloads(
+    base: dict | None,
+    override: dict | None,
+    *,
+    adapter_has_explicit_auto_tokenizer: bool,
+) -> dict | None:
+    merged = _merge_json_payloads(base, override)
+    if not isinstance(merged, dict) or adapter_has_explicit_auto_tokenizer:
+        return merged
+    _restore_base_tokenizer_loader_fields(merged, base)
+    return merged
+
+
+def _restore_base_tokenizer_loader_fields(merged: dict, base: dict | None) -> None:
+    tokenizer_class = None
+    if isinstance(base, dict):
+        candidate = base.get("tokenizer_class")
+        if isinstance(candidate, str) and candidate:
+            tokenizer_class = candidate
+    if tokenizer_class is None:
+        merged.pop("tokenizer_class", None)
+    else:
+        merged["tokenizer_class"] = tokenizer_class
+    _restore_base_auto_map_entry(merged, base, key="AutoTokenizer")
+
+
+def _restore_base_auto_map_entry(merged: dict, base: dict | None, *, key: str) -> None:
+    base_auto_map = base.get("auto_map") if isinstance(base, dict) else None
+    merged_auto_map = merged.get("auto_map")
+    base_value, base_has_value, base_uses_list = _extract_auto_map_value(base, key=key)
+    if base_uses_list:
+        merged["auto_map"] = base_value
+        return
+    if isinstance(base_auto_map, dict):
+        updated_auto_map = (
+            dict(merged_auto_map) if isinstance(merged_auto_map, dict) else dict(base_auto_map)
+        )
+        if base_has_value:
+            updated_auto_map[key] = base_value
+        else:
+            updated_auto_map.pop(key, None)
+        if updated_auto_map:
+            merged["auto_map"] = updated_auto_map
+        else:
+            merged.pop("auto_map", None)
+        return
+    if isinstance(merged_auto_map, dict):
+        if key not in merged_auto_map:
+            return
+        updated_auto_map = dict(merged_auto_map)
+        updated_auto_map.pop(key, None)
+        if updated_auto_map:
+            merged["auto_map"] = updated_auto_map
+        else:
+            merged.pop("auto_map", None)
+        return
+    if key == "AutoTokenizer" and isinstance(merged_auto_map, (list, tuple)):
+        merged.pop("auto_map", None)
+
+
+def _extract_auto_map_value(
+    payload: dict | None,
+    *,
+    key: str,
+) -> tuple[object | None, bool, bool]:
+    if not isinstance(payload, dict):
+        return None, False, False
+    auto_map = payload.get("auto_map")
+    if key == "AutoTokenizer" and isinstance(auto_map, (list, tuple)):
+        if not any(isinstance(value, str) and value for value in auto_map):
+            return None, False, False
+        return list(auto_map), True, True
+    if not isinstance(auto_map, dict) or key not in auto_map:
+        return None, False, False
+    value = auto_map[key]
+    values = value if isinstance(value, (list, tuple)) else [value]
+    if not any(isinstance(entry, str) and entry for entry in values):
+        return None, False, False
+    if isinstance(value, tuple):
+        value = list(value)
+    elif isinstance(value, list):
+        value = list(value)
+    return value, True, False
 
 
 def _collect_remote_code_files(
