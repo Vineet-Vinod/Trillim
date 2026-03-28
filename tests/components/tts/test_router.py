@@ -309,6 +309,28 @@ class TTSRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "backend voice builder crashed")
 
+    def test_voice_upload_maps_voice_state_size_limit_failures_to_400(self):
+        async def failing_builder(_audio_path: Path) -> bytes:
+            raise WorkerFailureError(
+                "custom voice state exceeds the 64 MB limit; use a shorter reference sample"
+            )
+
+        server, root_patch, imports_patch, builtins_patch = self._make_server(
+            voice_state_builder=failing_builder
+        )
+        with root_patch, builtins_patch, imports_patch:
+            with TestClient(server.app) as client:
+                response = client.post(
+                    "/v1/voices",
+                    content=b"voice",
+                    headers={"name": "custom"},
+                )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"],
+            "custom voice state exceeds the 64 MB limit; use a shorter reference sample",
+        )
+
     def test_audio_speech_streams_error_events_and_http_error_mapping(self):
         async def failing_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
             del text, voice_kind, voice_reference

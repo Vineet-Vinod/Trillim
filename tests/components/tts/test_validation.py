@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import torch
 
+from trillim.components.tts._limits import MAX_VOICE_STATE_BYTES
 from trillim.components.tts._validation import (
     PayloadTooLargeError,
     _validate_content_length,
@@ -97,7 +98,7 @@ class TTSValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
             validate_voice_state_bytes(b"")
         with self.assertRaisesRegex(InvalidRequestError, "byte limit"):
-            validate_voice_state_bytes(b"x" * ((16 * 1024 * 1024) + 1))
+            validate_voice_state_bytes(b"x" * (MAX_VOICE_STATE_BYTES + 1))
 
     def test_load_safe_voice_state_bytes_rejects_unsafe_or_malformed_payloads(self):
         buffer = io.BytesIO()

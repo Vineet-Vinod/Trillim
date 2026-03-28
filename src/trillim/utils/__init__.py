@@ -7,6 +7,7 @@ from trillim.utils.filesystem import (
     ensure_within_root,
     unlink_if_exists,
 )
+from trillim.utils.formatting import human_size
 from trillim.utils.ids import stable_id
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "atomic_write_bytes",
     "canonicalize_path",
     "ensure_within_root",
+    "human_size",
     "stable_id",
     "unlink_if_exists",
 ]

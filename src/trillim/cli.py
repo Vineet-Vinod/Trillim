@@ -22,6 +22,7 @@ from trillim._bundle_metadata import CURRENT_FORMAT_VERSION
 from trillim.components.llm._events import ChatDoneEvent, ChatTokenEvent
 from trillim.components.llm._model_dir import validate_lora_dir, validate_model_dir
 from trillim.errors import ModelValidationError
+from trillim.utils.formatting import human_size as _human_size
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -34,17 +35,6 @@ class _LocalBundle:
     entry_type: str
     size_bytes: int
     size_human: str
-
-
-def _human_size(size_bytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size_bytes < 1024:
-            if unit == "B":
-                return f"{size_bytes:.0f} {unit}"
-            return f"{size_bytes:.1f} {unit}".rstrip("0").rstrip(".")
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} PB"
-
 
 def _validate_pull_id(model_id: str) -> str:
     namespace, name = _model_store.parse_store_id(model_id, error_type=RuntimeError)

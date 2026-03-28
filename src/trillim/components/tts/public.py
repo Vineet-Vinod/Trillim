@@ -51,6 +51,7 @@ _CLIENT_VOICE_BUILD_ERROR_SNIPPETS = (
     "format not recognized",
     "unknown format",
     "invalid data found when processing input",
+    "custom voice state exceeds the",
 )
 
 

@@ -243,6 +243,23 @@ class TTSWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ProgressTimeoutError, "voice-state build timed out"):
                 await build_voice_state(audio_path)
 
+    async def test_build_voice_state_reports_voice_state_size_limit_clearly(self):
+        audio_path = self.root / "voice.txt"
+        audio_path.write_text("voice", encoding="latin-1")
+        with patch(
+            "trillim.components.tts._worker._worker_command",
+            return_value=(
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'x' * 9)",
+            ),
+        ), patch("trillim.components.tts._worker.MAX_VOICE_STATE_BYTES", 8):
+            with self.assertRaisesRegex(
+                WorkerFailureError,
+                "custom voice state exceeds the 8 B limit; use a shorter reference sample",
+            ):
+                await build_voice_state(audio_path)
+
     async def test_synthesize_segment_timeout_and_nonzero_exit_surface_worker_failures(self):
         process = SimpleNamespace(returncode=None)
         with patch(

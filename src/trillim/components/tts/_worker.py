@@ -20,6 +20,7 @@ from trillim.components.tts._limits import (
 )
 from trillim.components.tts._validation import load_safe_voice_state_bytes
 from trillim.errors import ProgressTimeoutError
+from trillim.utils.formatting import human_size
 
 
 class WorkerFailureError(RuntimeError):
@@ -257,7 +258,12 @@ async def build_voice_state(audio_path: str | Path) -> bytes:
         ) from exc
     except _WorkerStreamTooLargeError as exc:
         await _stop_process(process)
-        raise WorkerFailureError(str(exc)) from exc
+        message = (
+            _voice_state_too_large_message()
+            if str(exc) == "TTS worker produced oversized stdout output"
+            else str(exc)
+        )
+        raise WorkerFailureError(message) from exc
     except asyncio.CancelledError:
         await _stop_process(process)
         raise
@@ -293,6 +299,13 @@ async def _stop_process(process: asyncio.subprocess.Process) -> None:
 def _error_message(stderr: bytes) -> str:
     message = stderr[:MAX_WORKER_ERROR_BYTES].decode("utf-8", errors="replace").strip()
     return message or "TTS worker failed"
+
+
+def _voice_state_too_large_message() -> str:
+    return (
+        f"custom voice state exceeds the {human_size(MAX_VOICE_STATE_BYTES)} limit; "
+        "use a shorter reference sample"
+    )
 
 
 async def _collect_worker_output(

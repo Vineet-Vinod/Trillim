@@ -148,6 +148,22 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
             await tts.register_voice("custom", str(source))
         await tts.stop()
 
+    async def test_register_voice_maps_voice_state_size_limit_to_invalid_request(self):
+        async def bad_voice_builder(_audio_path: Path) -> bytes:
+            raise WorkerFailureError(
+                "custom voice state exceeds the 64 MB limit; use a shorter reference sample"
+            )
+
+        tts = await self._start_tts(voice_state_builder=bad_voice_builder)
+        source = Path(self._temp_dir.name) / "voice.wav"
+        source.write_bytes(b"voice")
+        with self.assertRaisesRegex(
+            InvalidRequestError,
+            "custom voice state exceeds the 64 MB limit; use a shorter reference sample",
+        ):
+            await tts.register_voice("custom", str(source))
+        await tts.stop()
+
     async def test_register_voice_preserves_backend_worker_failure(self):
         async def bad_voice_builder(_audio_path: Path) -> bytes:
             raise WorkerFailureError("backend voice builder crashed")
