@@ -9,6 +9,7 @@ import runpy
 import struct
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,11 +26,13 @@ from trillim.components.tts._worker import (
     _REQUEST_HEADER,
     _RESPONSE_HEADER,
     _audio_tensor_to_pcm_bytes,
+    _bind_stateful_module_names,
     _collect_worker_output,
     _error_message,
     _load_worker_state,
     _run_session_worker,
     _stop_process,
+    _worker_command,
     build_voice_state,
     create_session_worker,
     is_voice_cloning_auth_error,
@@ -41,6 +44,102 @@ from tests.components.tts.support import prepend_pythonpath, write_fake_pocket_t
 
 class _UnsafeState:
     pass
+
+
+class _FakeStatefulModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self._module_absolute_name = None
+
+    def init_state(self, batch_size: int, sequence_length: int) -> dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    def get_state(self, model_state: dict[str, dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        return model_state[self._module_absolute_name]
+
+
+def _fake_init_states(
+    model: torch.nn.Module,
+    *,
+    batch_size: int,
+    sequence_length: int,
+) -> dict[str, dict[str, torch.Tensor]]:
+    result: dict[str, dict[str, torch.Tensor]] = {}
+    for module_name, module in model.named_modules():
+        if not isinstance(module, _FakeStatefulModule):
+            continue
+        module._module_absolute_name = module_name
+        result[module_name] = module.init_state(batch_size, sequence_length=sequence_length)
+    return result
+
+
+_FAKE_STATEFUL_MODULE = types.ModuleType("pocket_tts.modules.stateful_module")
+_FAKE_STATEFUL_MODULE.StatefulModule = _FakeStatefulModule
+_FAKE_STATEFUL_MODULE.init_states = _fake_init_states
+
+
+class _FakeStreamingAttention(_FakeStatefulModule):
+    def init_state(self, batch_size: int, sequence_length: int) -> dict[str, torch.Tensor]:
+        return {
+            "cache": torch.zeros((2, batch_size, sequence_length, 1, 1)),
+            "current_end": torch.zeros((0,)),
+        }
+
+
+class _FakeFlowLayer(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.self_attn = _FakeStreamingAttention()
+
+
+class _FakeFlowLM(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.transformer = torch.nn.Module()
+        self.transformer.layers = torch.nn.ModuleList([_FakeFlowLayer()])
+
+
+class _FakeStatefulPocketTTSModel:
+    def __init__(self) -> None:
+        self.flow_lm = _FakeFlowLM()
+
+    def get_state_for_audio_prompt(self, audio_conditioning):
+        del audio_conditioning
+        return _fake_init_states(
+            self.flow_lm,
+            batch_size=1,
+            sequence_length=2,
+        )
+
+    def generate_audio(self, model_state, text_to_generate, max_tokens=20):
+        del text_to_generate, max_tokens
+        for module in self.flow_lm.modules():
+            if isinstance(module, _FakeStatefulModule):
+                module.get_state(model_state)
+        return [0.0, 0.25, -0.25]
+
+
+def _stateful_voice_state(model: _FakeStatefulPocketTTSModel) -> dict[str, dict[str, torch.Tensor]]:
+    return _fake_init_states(
+        model.flow_lm,
+        batch_size=1,
+        sequence_length=2,
+    )
+
+
+def _fake_stateful_pocket_tts_modules(model: _FakeStatefulPocketTTSModel) -> dict[str, object]:
+    package = types.ModuleType("pocket_tts")
+    package.__path__ = []
+    package.TTSModel = SimpleNamespace(load_model=lambda: model)
+    modules_package = types.ModuleType("pocket_tts.modules")
+    modules_package.__path__ = []
+    modules_package.stateful_module = _FAKE_STATEFUL_MODULE
+    package.modules = modules_package
+    return {
+        "pocket_tts": package,
+        "pocket_tts.modules": modules_package,
+        "pocket_tts.modules.stateful_module": _FAKE_STATEFUL_MODULE,
+    }
 
 
 def _write_counting_fake_pocket_tts_package(root: Path, counter_path: Path) -> None:
@@ -152,25 +251,31 @@ class TTSWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_voice_cloning_auth_error("not an auth error"))
 
     def test_load_worker_state_rejects_unsafe_serialized_state(self):
+        model = _FakeStatefulPocketTTSModel()
+        fake_modules = _fake_stateful_pocket_tts_modules(model)
         good_path = self.root / "voice.state"
-        torch.save({"prompt": "voice"}, good_path)
-        self.assertEqual(
-            _load_worker_state(
-                SimpleNamespace(),
+        torch.save(_stateful_voice_state(model), good_path)
+        with patch.dict(sys.modules, fake_modules):
+            loaded_state = _load_worker_state(
+                model,
                 voice_kind="state_file",
                 voice_reference=str(good_path),
-            )["prompt"],
-            "voice",
+            )
+        self.assertEqual(list(loaded_state), ["transformer.layers.0.self_attn"])
+        self.assertEqual(
+            sorted(loaded_state["transformer.layers.0.self_attn"]),
+            ["cache", "current_end"],
         )
 
         bad_path = self.root / "bad.state"
         torch.save({"bad": _UnsafeState()}, bad_path)
-        with self.assertRaisesRegex(Exception, "voice state is malformed"):
-            _load_worker_state(
-                SimpleNamespace(),
-                voice_kind="state_file",
-                voice_reference=str(bad_path),
-            )
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(Exception, "voice state is malformed"):
+                _load_worker_state(
+                    model,
+                    voice_kind="state_file",
+                    voice_reference=str(bad_path),
+                )
 
         with self.assertRaisesRegex(ValueError, "unsupported voice kind"):
             _load_worker_state(
@@ -178,6 +283,146 @@ class TTSWorkerTests(unittest.IsolatedAsyncioTestCase):
                 voice_kind="unknown",
                 voice_reference="ignored",
             )
+
+    def test_load_worker_state_binds_names_and_rejects_incompatible_saved_state_early(self):
+        model = _FakeStatefulPocketTTSModel()
+        fake_modules = _fake_stateful_pocket_tts_modules(model)
+        stateful_modules = [
+            module
+            for module in model.flow_lm.modules()
+            if isinstance(module, _FakeStatefulModule)
+        ]
+        self.assertEqual(
+            [module._module_absolute_name for module in stateful_modules],
+            [None],
+        )
+
+        good_path = self.root / "good.state"
+        torch.save(_stateful_voice_state(model), good_path)
+        with patch.dict(sys.modules, fake_modules):
+            _load_worker_state(
+                model,
+                voice_kind="state_file",
+                voice_reference=str(good_path),
+            )
+        self.assertEqual(
+            [module._module_absolute_name for module in stateful_modules],
+            ["transformer.layers.0.self_attn"],
+        )
+
+        wrong_module_path = self.root / "wrong-module.state"
+        wrong_module_state = {
+            "wrong.module": _stateful_voice_state(model)["transformer.layers.0.self_attn"]
+        }
+        torch.save(wrong_module_state, wrong_module_path)
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(RuntimeError, "missing module state"):
+                _load_worker_state(
+                    model,
+                    voice_kind="state_file",
+                    voice_reference=str(wrong_module_path),
+                )
+
+        missing_key_path = self.root / "missing-key.state"
+        missing_key_state = {
+            "transformer.layers.0.self_attn": {"cache": torch.zeros((2, 1, 2, 1, 1))}
+        }
+        torch.save(missing_key_state, missing_key_path)
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(RuntimeError, "missing keys 'current_end'"):
+                _load_worker_state(
+                    model,
+                    voice_kind="state_file",
+                    voice_reference=str(missing_key_path),
+                )
+
+        unexpected_key_path = self.root / "unexpected-key.state"
+        unexpected_key_state = {
+            "transformer.layers.0.self_attn": {
+                "cache": torch.zeros((2, 1, 2, 1, 1)),
+                "current_end": torch.zeros((0,)),
+                "extra": torch.ones((1,)),
+            }
+        }
+        torch.save(unexpected_key_state, unexpected_key_path)
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(RuntimeError, "unexpected keys 'extra'"):
+                _load_worker_state(
+                    model,
+                    voice_kind="state_file",
+                    voice_reference=str(unexpected_key_path),
+                )
+
+        malformed_module_state_path = self.root / "malformed-module.state"
+        malformed_module_state = {
+            "transformer.layers.0.self_attn": torch.zeros((1,))
+        }
+        torch.save(malformed_module_state, malformed_module_state_path)
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(RuntimeError, "is malformed"):
+                _load_worker_state(
+                    model,
+                    voice_kind="state_file",
+                    voice_reference=str(malformed_module_state_path),
+                )
+
+        unexpected_module_path = self.root / "unexpected-module.state"
+        unexpected_module_state = {
+            "transformer.layers.0.self_attn": _stateful_voice_state(model)["transformer.layers.0.self_attn"],
+            "extra0": {},
+            "extra1": {},
+            "extra2": {},
+            "extra3": {},
+            "extra4": {},
+        }
+        torch.save(unexpected_module_state, unexpected_module_path)
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"unexpected module state for 'extra0', 'extra1', 'extra2', 'extra3', \.\.\.",
+            ):
+                _load_worker_state(
+                    model,
+                    voice_kind="state_file",
+                    voice_reference=str(unexpected_module_path),
+                )
+
+    def test_bind_stateful_module_names_rejects_missing_or_malformed_models(self):
+        base_model = _FakeStatefulPocketTTSModel()
+        fake_modules = _fake_stateful_pocket_tts_modules(base_model)
+
+        class _NoStatefulFlowLM(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.linear = torch.nn.Linear(1, 1)
+
+        class _NoStatefulModel:
+            def __init__(self) -> None:
+                self.flow_lm = _NoStatefulFlowLM()
+
+        class _MalformedStatefulModule(_FakeStatefulModule):
+            def init_state(self, batch_size: int, sequence_length: int):
+                del batch_size, sequence_length
+                return ["bad-state"]
+
+        class _MalformedFlowLM(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.transformer = torch.nn.Module()
+                self.transformer.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.transformer.layers[0].self_attn = _MalformedStatefulModule()
+
+        class _MalformedModel:
+            def __init__(self) -> None:
+                self.flow_lm = _MalformedFlowLM()
+
+        with patch.dict(sys.modules, fake_modules):
+            with self.assertRaisesRegex(RuntimeError, "model is missing flow_lm"):
+                _bind_stateful_module_names(SimpleNamespace())
+            with self.assertRaisesRegex(RuntimeError, "model has no stateful modules"):
+                _bind_stateful_module_names(_NoStatefulModel())
+            with self.assertRaisesRegex(RuntimeError, "produced malformed state"):
+                _bind_stateful_module_names(_MalformedModel())
 
     async def test_worker_helpers_bound_stdout_and_stderr(self):
         with patch(
@@ -568,6 +813,56 @@ class TTSWorkerTests(unittest.IsolatedAsyncioTestCase):
                     voice_kind="predefined",
                     voice_reference="alba",
                 )
+
+    def test_run_session_worker_streams_saved_state_voices_like_built_ins(self):
+        model = _FakeStatefulPocketTTSModel()
+        state_path = self.root / "voice.state"
+        torch.save(_stateful_voice_state(model), state_path)
+        fake_modules = _fake_stateful_pocket_tts_modules(model)
+
+        def run_once(*, voice_kind: str, voice_reference: str) -> bytes:
+            request = _REQUEST_HEADER.pack(len(b"hello")) + b"hello"
+            stdin_buffer = io.BytesIO(request)
+            stdout_buffer = io.BytesIO()
+            with patch.dict(sys.modules, fake_modules), patch(
+                "trillim.components.tts._worker.sys.stdin",
+                SimpleNamespace(buffer=stdin_buffer),
+            ), patch(
+                "trillim.components.tts._worker.sys.stdout",
+                SimpleNamespace(buffer=stdout_buffer),
+            ):
+                self.assertEqual(
+                    _run_session_worker(
+                        voice_kind=voice_kind,
+                        voice_reference=voice_reference,
+                    ),
+                    0,
+                )
+            return stdout_buffer.getvalue()
+
+        built_in_payload = run_once(
+            voice_kind="predefined",
+            voice_reference="alba",
+        )
+        saved_state_payload = run_once(
+            voice_kind="state_file",
+            voice_reference=str(state_path),
+        )
+        self.assertEqual(saved_state_payload, built_in_payload)
+
+    async def test_worker_command_bootstrap_avoids_runpy_warning(self):
+        audio_path = self.root / "voice.txt"
+        audio_path.write_text("voice", encoding="latin-1")
+        with patch.dict(os.environ, prepend_pythonpath(self.root)):
+            process = await asyncio.create_subprocess_exec(
+                *_worker_command("voice-state", audio_path=str(audio_path)),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+        self.assertEqual(process.returncode, 0)
+        self.assertTrue(stdout)
+        self.assertEqual(stderr, b"")
 
     def test_worker_module_main_raises_system_exit_under_dunder_main(self):
         audio_path = self.root / "voice.txt"

@@ -33,6 +33,10 @@ class _WorkerStreamTooLargeError(RuntimeError):
 
 _RESPONSE_HEADER = struct.Struct(">cI")
 _REQUEST_HEADER = struct.Struct(">I")
+_WORKER_BOOTSTRAP = (
+    "from trillim.components.tts._worker import main; "
+    "raise SystemExit(main())"
+)
 _VOICE_CLONE_AUTH_ERROR = """ValueError: We could not download the weights for the model with voice cloning, but you're trying to use voice cloning. Without voice cloning, you can use our catalog of voices ['alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma']. If you want access to the model with voice cloning, go to https://huggingface.co/kyutai/pocket-tts and accept the terms, then make sure you're logged in locally with `uvx hf auth login`""".lower()
 
 
@@ -279,7 +283,7 @@ def is_voice_cloning_auth_error(message: str) -> bool:
 
 
 def _worker_command(command: str, **kwargs: str) -> tuple[str, ...]:
-    args = [sys.executable, "-m", "trillim.components.tts._worker", command]
+    args = [sys.executable, "-c", _WORKER_BOOTSTRAP, command]
     for key, value in kwargs.items():
         args.extend([f"--{key.replace('_', '-')}", value])
     return tuple(args)
@@ -400,8 +404,87 @@ def _load_worker_state(model, *, voice_kind: str, voice_reference: str):
     if voice_kind == "predefined":
         return model.get_state_for_audio_prompt(voice_reference)
     if voice_kind == "state_file":
-        return load_safe_voice_state_bytes(Path(voice_reference).read_bytes())
+        state = load_safe_voice_state_bytes(Path(voice_reference).read_bytes())
+        _validate_state_file_voice_state(model, state)
+        return state
     raise ValueError(f"unsupported voice kind: {voice_kind}")
+
+
+def _validate_state_file_voice_state(model, state: dict) -> None:
+    expected_keys_by_module = _bind_stateful_module_names(model)
+    actual_module_names = set(state)
+    expected_module_names = set(expected_keys_by_module)
+    missing_modules = expected_module_names - actual_module_names
+    if missing_modules:
+        raise RuntimeError(
+            "custom voice state is incompatible with the installed PocketTTS model: "
+            f"missing module state for {_format_name_set(missing_modules)}"
+        )
+    unexpected_modules = actual_module_names - expected_module_names
+    if unexpected_modules:
+        raise RuntimeError(
+            "custom voice state is incompatible with the installed PocketTTS model: "
+            f"unexpected module state for {_format_name_set(unexpected_modules)}"
+        )
+    for module_name, expected_keys in expected_keys_by_module.items():
+        module_state = state.get(module_name)
+        if not isinstance(module_state, dict):
+            raise RuntimeError(
+                "custom voice state is incompatible with the installed PocketTTS model: "
+                f"module state for {module_name!r} is malformed"
+            )
+        actual_keys = set(module_state)
+        missing_keys = expected_keys - actual_keys
+        if missing_keys:
+            raise RuntimeError(
+                "custom voice state is incompatible with the installed PocketTTS model: "
+                f"module state for {module_name!r} is missing keys "
+                f"{_format_name_set(missing_keys)}"
+            )
+        unexpected_keys = actual_keys - expected_keys
+        if unexpected_keys:
+            raise RuntimeError(
+                "custom voice state is incompatible with the installed PocketTTS model: "
+                f"module state for {module_name!r} contains unexpected keys "
+                f"{_format_name_set(unexpected_keys)}"
+            )
+
+
+def _bind_stateful_module_names(model) -> dict[str, set[str]]:
+    from pocket_tts.modules.stateful_module import StatefulModule
+
+    flow_lm = getattr(model, "flow_lm", None)
+    if flow_lm is None:
+        raise RuntimeError(
+            "custom voice state is incompatible with the installed PocketTTS model: "
+            "model is missing flow_lm"
+        )
+    expected_keys_by_module: dict[str, set[str]] = {}
+    for module_name, module in flow_lm.named_modules():
+        if not isinstance(module, StatefulModule):
+            continue
+        module._module_absolute_name = module_name
+        initial_state = module.init_state(batch_size=1, sequence_length=1)
+        if not isinstance(initial_state, dict):
+            raise RuntimeError(
+                "custom voice state is incompatible with the installed PocketTTS model: "
+                f"module {module_name!r} produced malformed state"
+            )
+        expected_keys_by_module[module_name] = set(initial_state)
+    if not expected_keys_by_module:
+        raise RuntimeError(
+            "custom voice state is incompatible with the installed PocketTTS model: "
+            "model has no stateful modules"
+        )
+    return expected_keys_by_module
+
+
+def _format_name_set(names: set[str], *, limit: int = 4) -> str:
+    ordered = sorted(names)
+    shown = ", ".join(repr(name) for name in ordered[:limit])
+    if len(ordered) > limit:
+        shown = f"{shown}, ..."
+    return shown
 
 
 def _audio_tensor_to_pcm_bytes(audio) -> bytes:
