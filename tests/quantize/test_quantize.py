@@ -8,6 +8,7 @@ import math
 import os
 import struct
 import tempfile
+import tomllib
 import types
 import unittest
 from contextlib import redirect_stdout
@@ -2129,7 +2130,15 @@ class QuantizeInternalTests(unittest.TestCase):
                 "trillim.quantize._output.importlib_metadata.version",
                 side_effect=output.importlib_metadata.PackageNotFoundError,
             ):
-                self.assertEqual(output._project_version(), "0.6.0")
+                pyproject_payload = tomllib.loads(
+                    (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(
+                    output._project_version(),
+                    str(pyproject_payload["project"]["version"]),
+                )
             with patch(
                 "trillim.quantize._output.importlib_metadata.version",
                 return_value="9.9.9",
