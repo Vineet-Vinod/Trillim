@@ -119,6 +119,24 @@ _ARCH_REGISTRY: dict[str, _ArchInfo] = {
         embedding_key="model.embed_tokens.weight",
         final_norm_key="model.norm.weight",
     ),
+    "qwen3forcausallm": _ArchInfo(
+        arch_type=ArchitectureType.BONSAI,
+        component_order=(
+            "input_layernorm",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.q_proj",
+            "self_attn.q_norm",
+            "self_attn.k_norm",
+            "self_attn.o_proj",
+            "post_attention_layernorm",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        ),
+        embedding_key="model.embed_tokens.weight",
+        final_norm_key="model.norm.weight",
+    ),
 }
 
 

@@ -90,6 +90,12 @@ _ARCH_REGISTRY: dict[str, _ArchitectureInfo] = {
         has_attn_sub_norm=True,
         has_ffn_sub_norm=True,
     ),
+    "qwen3forcausallm": _ArchitectureInfo(
+        arch_type=ArchitectureType.BONSAI,
+        activation=ActivationType.SILU,
+        has_attn_sub_norm=False,
+        has_ffn_sub_norm=False,
+    ),
 }
 _ACTIVATION_MAP = {
     "relu_squared": ActivationType.RELU_SQR,

@@ -27,6 +27,7 @@ class ArchitectureType(IntEnum):
     BITNET = 1
     LLAMA = 2
     QWEN35 = 3
+    BONSAI = 4
 
 
 class ActivationType(IntEnum):
