@@ -14,6 +14,7 @@ from trillim.components.tts._limits import (
     TARGET_TTS_TOKENS,
 )
 from trillim.components.tts._segmenter import (
+    _add_leadin,
     _hard_split_unit,
     _iter_grouped_segments,
     _iter_paragraph_segments,
@@ -40,12 +41,12 @@ class TTSSegmenterTests(unittest.TestCase):
         third = "alpha beta gamma delta epsilon."
         text = f"{first} {second}\n\n{third}"
         segments = list(iter_text_segments(text, self.tokenizer))
-        self.assertEqual(segments, [first, second, third])
+        self.assertEqual(segments, [f"  {first}", f"  {second}", f"  {third}"])
 
     def test_iter_text_segments_replaces_too_long_non_whitespace_tokens(self):
         word = "x" * (HARD_TEXT_SEGMENT_CAP + 10)
         segments = list(iter_text_segments(f"alpha {word} omega", self.tokenizer))
-        self.assertEqual(segments, ["alpha too-long-word-skipped omega"])
+        self.assertEqual(segments, ["  alpha too-long-word-skipped omega"])
         self.assertTrue(all("x" * 51 not in segment for segment in segments))
         self.assertTrue(
             all(count_tts_tokens(segment, self.tokenizer) <= TARGET_TTS_TOKENS for segment in segments)
@@ -160,6 +161,15 @@ class TTSSegmenterTests(unittest.TestCase):
             segments = list(_iter_paragraph_segments("ignored", self.tokenizer))
 
         self.assertEqual(segments, ["alpha beta."])
+
+    def test_add_leadin_prefixes_only_when_candidate_stays_within_limits(self):
+        self.assertEqual(_add_leadin("alpha beta.", self.tokenizer), "  alpha beta.")
+
+        with patch(
+            "trillim.components.tts._segmenter._fits_segment_limits",
+            side_effect=[False],
+        ):
+            self.assertEqual(_add_leadin("beta gamma.", self.tokenizer), "beta gamma.")
 
     def test_load_pocket_tts_tokenizer_uses_lookup_configuration(self):
         captured: list[tuple[int, str]] = []

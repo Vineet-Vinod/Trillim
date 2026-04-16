@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,8 +25,10 @@ from trillim.components.tts._session import _create_tts_session
 from trillim.components.tts._worker import WorkerFailureError
 from trillim.components.tts.public import (
     TTS,
+    _apply_exponential_fade_in_pcm,
     _boundary_pause_ms,
     _pcm_silence,
+    _postprocess_segment_pcm,
     _segment_pause_pcm,
     _StreamingPCMStretcher,
 )
@@ -236,7 +239,7 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         tts = await self._start_tts()
         session = await tts.speak("hello world")
         pcm = await session.collect()
-        self.assertIn(b"hello world", pcm)
+        self.assertTrue(pcm)
         wav = await tts.synthesize_wav("tiny prompt")
         self.assertTrue(wav.startswith(b"RIFF"))
         await tts.stop()
@@ -272,18 +275,39 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
     async def test_speak_inserts_punctuation_pause_between_segments_without_trailing_silence(
         self,
     ):
+        frame_samples = round(PCM_SAMPLE_RATE * 5 / 1000.0)
+        first_pcm = struct.pack(
+            f"<{frame_samples * 6}h",
+            *([4_000] * (frame_samples * 6)),
+        )
+        second_pcm = struct.pack(
+            f"<{frame_samples * 9}h",
+            *(
+                [12_000] * frame_samples
+                + [0] * (frame_samples * 2)
+                + [4_000] * (frame_samples * 6)
+            ),
+        )
+
         async def text_synth(
             text: str, *, voice_kind: str, voice_reference: str
         ) -> bytes:
             del voice_kind, voice_reference
-            return text.encode("utf-8")
+            if text == "  alpha.":
+                return first_pcm
+            self.assertEqual(text, "  beta.")
+            return second_pcm
 
         tts = await self._start_tts(synth=text_synth)
         with patch("trillim.components.tts.public.random.uniform", return_value=1.0):
             pcm = await (await tts.speak("alpha. beta.")).collect()
+            expected_pause = _pcm_silence(_boundary_pause_ms("  alpha."))
+            expected_pcm = (
+                _postprocess_segment_pcm(first_pcm, text="  alpha.", speed=1.0, add_pause=True)
+                + _postprocess_segment_pcm(second_pcm, text="  beta.", speed=1.0, add_pause=False)
+            )
 
-        expected_pause = _pcm_silence(_boundary_pause_ms("alpha."))
-        self.assertEqual(pcm, b"alpha." + expected_pause + b"beta.")
+        self.assertEqual(pcm, expected_pcm)
         self.assertFalse(pcm.endswith(expected_pause))
         await tts.stop()
 
@@ -299,8 +323,46 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
     def test_boundary_pause_helpers_cover_clause_and_non_boundary_cases(self):
         self.assertEqual(_boundary_pause_ms("alpha,"), 200)
         self.assertEqual(_boundary_pause_ms("alpha"), 0)
+        self.assertEqual(_boundary_pause_ms("   "), 0)
         self.assertEqual(_segment_pause_pcm("alpha", 1.0), b"")
         self.assertEqual(_pcm_silence(0), b"")
+
+    def test_apply_exponential_fade_in_pcm_ramps_start_and_preserves_tail(self):
+        fade_frames = round(PCM_SAMPLE_RATE * 10 / 1000.0)
+        pcm = struct.pack(
+            f"<{fade_frames * PCM_CHANNELS}h",
+            *([4_000] * (fade_frames * PCM_CHANNELS)),
+        )
+
+        faded = _apply_exponential_fade_in_pcm(pcm)
+        faded_samples = memoryview(faded).cast("h")
+
+        self.assertEqual(faded_samples[0], 0)
+        self.assertLess(faded_samples[PCM_CHANNELS], 500)
+        self.assertGreater(faded_samples[(fade_frames - 1) * PCM_CHANNELS], 3_900)
+        self.assertEqual(_apply_exponential_fade_in_pcm(b""), b"")
+        self.assertEqual(_apply_exponential_fade_in_pcm(b"\x00"), b"\x00")
+
+    def test_postprocess_segment_pcm_composes_fade_trim_and_optional_pause(self):
+        frame_samples = round(PCM_SAMPLE_RATE * 5 / 1000.0)
+        pcm = struct.pack(
+            f"<{frame_samples * 9}h",
+            *(
+                [12_000] * frame_samples
+                + [0] * (frame_samples * 2)
+                + [4_000] * (frame_samples * 6)
+            ),
+        )
+
+        with patch("trillim.components.tts.public.random.uniform", return_value=1.0):
+            self.assertEqual(
+                _postprocess_segment_pcm(pcm, text="  alpha.", speed=1.0, add_pause=True),
+                _apply_exponential_fade_in_pcm(pcm) + _pcm_silence(_boundary_pause_ms("  alpha.")),
+            )
+            self.assertEqual(
+                _postprocess_segment_pcm(pcm, text="  alpha.", speed=1.0, add_pause=False),
+                _apply_exponential_fade_in_pcm(pcm),
+            )
 
     async def test_second_request_is_rejected_while_running(self):
         started = asyncio.Event()
@@ -992,7 +1054,7 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         )
         tts = await self._start_tts()
         pcm = await (await tts.speak("hello world")).collect()
-        self.assertIn(b"hello world", pcm)
+        self.assertTrue(pcm)
         with self.assertRaisesRegex(Exception, "tampered"):
             await tts.list_voices()
         with self.assertRaisesRegex(Exception, "tampered"):
