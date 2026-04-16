@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import random
 import struct
 import tempfile
 from collections import deque
@@ -53,6 +54,10 @@ _CLIENT_VOICE_BUILD_ERROR_SNIPPETS = (
     "invalid data found when processing input",
     "custom voice state exceeds the",
 )
+_SENTENCE_BOUNDARY_PAUSE_MS = 400
+_CLAUSE_BOUNDARY_PAUSE_MS = 200
+_BOUNDARY_PAUSE_JITTER_MIN = 0.9
+_BOUNDARY_PAUSE_JITTER_MAX = 1.1
 
 
 class TTS(Component):
@@ -372,15 +377,24 @@ class TTS(Component):
     async def _run_session(self, session: _TTSSession) -> None:
         try:
             tokenizer = await self._get_tokenizer()
-            for segment in iter_text_segments(session._text, tokenizer):
+            segments = iter(iter_text_segments(session._text, tokenizer))
+            current_segment = next(segments, None)
+            while current_segment is not None:
                 speed = await self._wait_for_turn(session)
-                pcm = await session._session_worker.synthesize(segment)
+                pcm = await session._session_worker.synthesize(current_segment)
+                next_segment = next(segments, None)
                 stretched = _stretch_pcm_chunk(pcm, speed)
-                await session._put_chunk(stretched)
+                pause = (
+                    _segment_pause_pcm(current_segment, speed)
+                    if next_segment is not None
+                    else b""
+                )
+                await session._put_chunk(stretched + pause)
                 async with self._scheduler_lock:
                     session._chunk_in_flight = False
                     if session._pause_requested and session is self._active_session:
                         self._pause_active_locked(session)
+                current_segment = next_segment
             await self._complete_running_session(session)
         except asyncio.CancelledError:
             state = "owner_stopped" if session.state == "owner_stopped" else "cancelled"
@@ -523,6 +537,38 @@ def _stretch_pcm_chunk(pcm: bytes, speed: float) -> bytes:
         return pcm
     stretcher = _StreamingPCMStretcher(speed)
     return stretcher.push(pcm) + stretcher.finish()
+
+
+def _segment_pause_pcm(text: str, speed: float) -> bytes:
+    base_pause_ms = _boundary_pause_ms(text)
+    if base_pause_ms == 0:
+        return b""
+    jittered_pause_ms = base_pause_ms * random.uniform(
+        _BOUNDARY_PAUSE_JITTER_MIN,
+        _BOUNDARY_PAUSE_JITTER_MAX,
+    )
+    adjusted_pause_ms = jittered_pause_ms / speed
+    return _pcm_silence(adjusted_pause_ms)
+
+
+def _boundary_pause_ms(text: str) -> int:
+    stripped = text.rstrip()
+    if not stripped:
+        return 0
+    last_char = stripped[-1]
+    if last_char in ".!?":
+        return _SENTENCE_BOUNDARY_PAUSE_MS
+    if last_char in ",;:":
+        return _CLAUSE_BOUNDARY_PAUSE_MS
+    return 0
+
+
+def _pcm_silence(duration_ms: float) -> bytes:
+    if duration_ms <= 0:
+        return b""
+    frame_bytes = PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES
+    samples = round(PCM_SAMPLE_RATE * duration_ms / 1000.0)
+    return b"\x00" * (samples * frame_bytes)
 
 
 class _StreamingPCMStretcher:
