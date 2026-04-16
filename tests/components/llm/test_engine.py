@@ -84,12 +84,16 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def _make_engine(self) -> InferenceEngine:
-        return InferenceEngine(
-            make_runtime_model(Path("/tmp/model")),
-            FakeTokenizer(),
-            SamplingDefaults(),
-            progress_timeout=5.0,
-        )
+        with patch(
+            "trillim.components.llm._engine._bundled_binary_path",
+            return_value=self._expected_binary_path(),
+        ):
+            return InferenceEngine(
+                make_runtime_model(Path("/tmp/model")),
+                FakeTokenizer(),
+                SamplingDefaults(),
+                progress_timeout=5.0,
+            )
 
     def test_inference_engine_does_not_expose_binary_path_override(self):
         self.assertNotIn("binary_path", inspect.signature(InferenceEngine).parameters)
@@ -97,7 +101,12 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     def test_inference_engine_raises_when_bundled_binary_is_missing(self):
         with patch.object(engine_module.Path, "is_file", return_value=False):
             with self.assertRaisesRegex(FileNotFoundError, "Missing bundled LLM inference binary"):
-                self._make_engine()
+                InferenceEngine(
+                    make_runtime_model(Path("/tmp/model")),
+                    FakeTokenizer(),
+                    SamplingDefaults(),
+                    progress_timeout=5.0,
+                )
 
     def test_bundled_binary_path_uses_windows_suffix_and_fallback(self):
         exe_path = Path(self._expected_binary_path(os_name="nt", suffix=".exe"))
@@ -153,19 +162,23 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(process.stdin.writes[0].startswith(b"17\n"))
 
     async def test_start_writes_adapter_init_fields_when_configured(self):
-        engine = InferenceEngine(
-            make_runtime_model(Path("/tmp/model")),
-            FakeTokenizer(),
-            SamplingDefaults(),
-            init_config=InitConfig(
-                model_dir=Path("/tmp/model"),
-                num_threads=4,
-                lora_dir=Path("/tmp/adapter"),
-                lora_quant="q4_0",
-                unembed_quant="q8_0",
-            ),
-            progress_timeout=5.0,
-        )
+        with patch(
+            "trillim.components.llm._engine._bundled_binary_path",
+            return_value=self._expected_binary_path(),
+        ):
+            engine = InferenceEngine(
+                make_runtime_model(Path("/tmp/model")),
+                FakeTokenizer(),
+                SamplingDefaults(),
+                init_config=InitConfig(
+                    model_dir=Path("/tmp/model"),
+                    num_threads=4,
+                    lora_dir=Path("/tmp/adapter"),
+                    lora_quant="q4_0",
+                    unembed_quant="q8_0",
+                ),
+                progress_timeout=5.0,
+            )
         process = _FakeProcess()
 
         with patch(
@@ -181,19 +194,23 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unembed_quant=q8_0\n", block)
 
     async def test_start_uses_only_the_first_line_of_string_init_fields(self):
-        engine = InferenceEngine(
-            make_runtime_model(Path("/tmp/model")),
-            FakeTokenizer(),
-            SamplingDefaults(),
-            init_config=InitConfig(
-                model_dir=Path("/tmp/model"),
-                num_threads=4,
-                lora_dir=Path("/tmp/adapter\nnum_threads=999"),
-                lora_quant="q4_0\nrope_theta=1",
-                unembed_quant="q8_0\nactivation=0",
-            ),
-            progress_timeout=5.0,
-        )
+        with patch(
+            "trillim.components.llm._engine._bundled_binary_path",
+            return_value=self._expected_binary_path(),
+        ):
+            engine = InferenceEngine(
+                make_runtime_model(Path("/tmp/model")),
+                FakeTokenizer(),
+                SamplingDefaults(),
+                init_config=InitConfig(
+                    model_dir=Path("/tmp/model"),
+                    num_threads=4,
+                    lora_dir=Path("/tmp/adapter\nnum_threads=999"),
+                    lora_quant="q4_0\nrope_theta=1",
+                    unembed_quant="q8_0\nactivation=0",
+                ),
+                progress_timeout=5.0,
+            )
         process = _FakeProcess()
 
         with patch(

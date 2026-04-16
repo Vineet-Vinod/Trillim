@@ -40,6 +40,7 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(info.init_config.num_threads, 4)
         self.assertEqual(LLMState.SERVER_ERROR.value, "server_error")
         self.assertEqual(ArchitectureType.LLAMA, 2)
+        self.assertEqual(ArchitectureType.BONSAI_TERNARY, 5)
         self.assertEqual(ActivationType.SILU, 1)
 
     def test_load_sampling_defaults_uses_generation_config_when_present(self):

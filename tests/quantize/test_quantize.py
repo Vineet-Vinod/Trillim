@@ -11,6 +11,7 @@ import tempfile
 import tomllib
 import types
 import unittest
+import warnings
 from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
@@ -257,6 +258,57 @@ def _write_qwen_multimodal_model(root: Path) -> Path:
     return model_dir
 
 
+def _write_bonsai_source_model(
+    root: Path,
+    *,
+    name: str = "bonsai-source",
+    readme_text: str,
+) -> Path:
+    model_dir = root / name
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "hidden_size": 128,
+                "intermediate_size": 256,
+                "num_attention_heads": 4,
+                "num_hidden_layers": 1,
+                "num_key_value_heads": 2,
+                "head_dim": 32,
+                "vocab_size": 64,
+                "max_position_embeddings": 4096,
+                "rope_theta": 1000000.0,
+                "hidden_act": "silu",
+                "tie_word_embeddings": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "README.md").write_text(readme_text, encoding="utf-8")
+    (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    _write_safetensors(
+        model_dir / "model.safetensors",
+        {
+            "model.embed_tokens.weight": ("F16", (8, 128)),
+            "model.layers.0.input_layernorm.weight": ("F16", (128,)),
+            "model.layers.0.self_attn.k_proj.weight": ("F16", (64, 128)),
+            "model.layers.0.self_attn.v_proj.weight": ("F16", (64, 128)),
+            "model.layers.0.self_attn.q_proj.weight": ("F16", (128, 128)),
+            "model.layers.0.self_attn.q_norm.weight": ("F16", (32,)),
+            "model.layers.0.self_attn.k_norm.weight": ("F16", (32,)),
+            "model.layers.0.self_attn.o_proj.weight": ("F16", (128, 128)),
+            "model.layers.0.post_attention_layernorm.weight": ("F16", (128,)),
+            "model.layers.0.mlp.gate_proj.weight": ("F16", (256, 128)),
+            "model.layers.0.mlp.up_proj.weight": ("F16", (256, 128)),
+            "model.layers.0.mlp.down_proj.weight": ("F16", (128, 256)),
+            "model.norm.weight": ("F16", (128,)),
+            "lm_head.weight": ("F16", (8, 128)),
+        },
+    )
+    return model_dir
+
+
 def _write_adapter(
     root: Path,
     *,
@@ -438,6 +490,90 @@ class QuantizeTests(unittest.TestCase):
         self.assertEqual(embedding_entry["action"], manifest.ACTION_BF16_RAW)
         self.assertEqual(repack_entry["action"], manifest.ACTION_REPACK_TERNARY)
         self.assertEqual((padded_entry["padded_row"], padded_entry["padded_col"]), (384, 256))
+
+    def test_bonsai_readme_discriminator_controls_manifest_and_bundle_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            binary_model_dir = _write_bonsai_source_model(
+                root,
+                name="bonsai-binary",
+                readme_text="Bonsai 1-bit release model.",
+            )
+            ternary_model_dir = _write_bonsai_source_model(
+                root,
+                name="bonsai-ternary",
+                readme_text="Ternary Bonsai release model.",
+            )
+            binary_config = entrypoint.load_model_config(binary_model_dir)
+            ternary_config = entrypoint.load_model_config(ternary_model_dir)
+
+            self.assertEqual(binary_config.arch_type, quantize_config.ArchitectureType.BONSAI)
+            self.assertEqual(
+                ternary_config.arch_type,
+                quantize_config.ArchitectureType.BONSAI_TERNARY,
+            )
+
+            binary_manifest = _read_manifest(
+                manifest.build_manifest(
+                    binary_model_dir,
+                    binary_config,
+                    output_dir=binary_model_dir,
+                    language_model_only=False,
+                )
+            )
+            ternary_manifest = _read_manifest(
+                manifest.build_manifest(
+                    ternary_model_dir,
+                    ternary_config,
+                    output_dir=ternary_model_dir,
+                    language_model_only=False,
+                )
+            )
+
+            self.assertEqual(binary_manifest["tensors"][0]["action"], manifest.ACTION_Q1_0_128)
+            self.assertEqual(
+                ternary_manifest["tensors"][0]["action"],
+                manifest.ACTION_GROUP_TERNARY_QUANTIZE,
+            )
+            self.assertEqual(binary_manifest["tensors"][-1]["action"], manifest.ACTION_Q1_0_128)
+            self.assertEqual(
+                ternary_manifest["tensors"][-1]["action"],
+                manifest.ACTION_GROUP_TERNARY_QUANTIZE,
+            )
+            norm_entry = next(
+                entry for entry in ternary_manifest["tensors"] if entry["row"] == 128 and entry["col"] == 1
+            )
+            self.assertEqual(norm_entry["action"], manifest.ACTION_BF16_RAW)
+
+            binary_output_dir = root / "binary-out"
+            ternary_output_dir = root / "ternary-out"
+            binary_output_dir.mkdir()
+            ternary_output_dir.mkdir()
+            output.copy_model_support_files(binary_model_dir, binary_output_dir)
+            output.copy_model_support_files(ternary_model_dir, ternary_output_dir)
+            output.write_model_metadata(binary_output_dir, config=binary_config, model_dir=binary_model_dir)
+            output.write_model_metadata(ternary_output_dir, config=ternary_config, model_dir=ternary_model_dir)
+
+            binary_bundle_config = json.loads(
+                (binary_output_dir / "config.json").read_text(encoding="utf-8")
+            )
+            ternary_bundle_config = json.loads(
+                (ternary_output_dir / "config.json").read_text(encoding="utf-8")
+            )
+            binary_metadata = json.loads(
+                (binary_output_dir / "trillim_config.json").read_text(encoding="utf-8")
+            )
+            ternary_metadata = json.loads(
+                (ternary_output_dir / "trillim_config.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(binary_bundle_config["architectures"], ["Qwen3ForCausalLM"])
+            self.assertEqual(
+                ternary_bundle_config["architectures"],
+                ["Qwen3ForCausalLM"],
+            )
+            self.assertEqual(binary_metadata["quantization"], "binary")
+            self.assertEqual(ternary_metadata["quantization"], "grouped-ternary")
 
     def test_build_manifest_rejects_unsupported_tensor_keys(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -944,7 +1080,13 @@ class QuantizeTests(unittest.TestCase):
                 (output_dir / "qmodel.tensors").write_bytes(b"model")
                 (output_dir / "rope.cache").write_bytes(b"rope")
 
-            with patch("trillim.quantize._entrypoint.run_model_quantizer", side_effect=fake_run_model_quantizer):
+            with patch(
+                "trillim.quantize._entrypoint.resolve_quantize_binary",
+                return_value=Path("/tmp/binary"),
+            ), patch(
+                "trillim.quantize._entrypoint.run_model_quantizer",
+                side_effect=fake_run_model_quantizer,
+            ):
                 result = quantize(model_dir)
 
             target = root / "Local" / "llama-source-TRNQ"
@@ -970,6 +1112,9 @@ class QuantizeTests(unittest.TestCase):
                 (output_dir / "qmodel.lora").write_bytes(b"adapter")
 
             with patch(
+                "trillim.quantize._entrypoint.resolve_quantize_binary",
+                return_value=Path("/tmp/binary"),
+            ), patch(
                 "trillim.quantize._entrypoint.run_adapter_quantizer",
                 side_effect=fake_run_adapter_quantizer,
             ), patch(
@@ -988,6 +1133,56 @@ class QuantizeTests(unittest.TestCase):
             managed_model.mkdir(parents=True)
             with self.assertRaisesRegex(ValueError, "must not be inside"):
                 quantize(managed_model)
+
+    def test_quantize_allows_grouped_ternary_bonsai_adapters(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = _write_bonsai_source_model(
+                root,
+                name="bonsai-ternary",
+                readme_text="Ternary Bonsai release model.",
+            )
+            adapter_dir = _write_adapter(
+                root,
+                tensors={
+                    "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": ("F32", (4, 128)),
+                    "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight": ("F32", (128, 4)),
+                    "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight": ("F32", (4, 128)),
+                    "base_model.model.model.layers.0.mlp.gate_proj.lora_B.weight": ("F32", (256, 4)),
+                },
+            )
+
+            def fake_run_adapter_quantizer(
+                _binary, _model_dir, _config, *, adapter_dir, output_dir, language_model_only
+            ):
+                del _binary, _model_dir, _config, adapter_dir, language_model_only
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "qmodel.lora").write_bytes(b"adapter")
+
+            with patch(
+                "trillim.quantize._entrypoint.resolve_quantize_binary",
+                return_value=Path("/tmp/binary"),
+            ), patch(
+                "trillim.quantize._entrypoint.run_adapter_quantizer",
+                side_effect=fake_run_adapter_quantizer,
+            ), patch(
+                "trillim.quantize._entrypoint.prepare_output_target",
+                return_value=Path("/tmp/adapter-target"),
+            ), patch(
+                "trillim.quantize._entrypoint.build_staging_dir",
+                return_value=Path("/tmp/adapter-staging"),
+            ), patch(
+                "trillim.quantize._entrypoint.copy_adapter_support_files",
+            ), patch(
+                "trillim.quantize._entrypoint.write_adapter_metadata",
+            ), patch(
+                "trillim.quantize._entrypoint.mark_staging_complete",
+            ), patch(
+                "trillim.quantize._entrypoint.publish_staging_dir",
+            ):
+                result = quantize(model_dir, adapter_dir)
+
+            self.assertEqual(result.bundle_type, "adapter")
 
 
 class QuantizeInternalTests(unittest.TestCase):
@@ -1185,6 +1380,24 @@ class QuantizeInternalTests(unittest.TestCase):
 
             with self.assertRaisesRegex(FileNotFoundError, "config.json"):
                 entrypoint.load_model_config(root / "missing-config")
+
+    def test_bonsai_readme_detection_warns_when_readme_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = _write_bonsai_source_model(
+                root,
+                name="bonsai-missing-readme",
+                readme_text="Bonsai 1-bit release model.",
+            )
+            (model_dir / "README.md").unlink()
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                config = entrypoint.load_model_config(model_dir)
+
+            self.assertEqual(config.arch_type, quantize_config.ArchitectureType.BONSAI)
+            self.assertEqual(len(caught), 1)
+            self.assertIn("defaulting Qwen3ForCausalLM Bonsai detection to binary", str(caught[0].message))
 
     def test_manifest_discovery_and_tensor_sorting_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
