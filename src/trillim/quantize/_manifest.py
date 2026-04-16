@@ -17,6 +17,7 @@ ACTION_BF16_RAW = 0
 ACTION_TERNARY_QUANTIZE = 1
 ACTION_REPACK_TERNARY = 3
 ACTION_Q1_0_128 = 4
+ACTION_GROUP_TERNARY_QUANTIZE = 5
 
 SECTION_TEXT_CORE = 1
 
@@ -54,6 +55,20 @@ def determine_language_model_only(model_dir: Path, config: ModelQuantizeConfig) 
         name.startswith("model.visual.") or name.startswith("mtp.")
         for name in tensor_names
     )
+
+
+def _is_bonsai_family(arch_type: ArchitectureType) -> bool:
+    return arch_type in {ArchitectureType.BONSAI, ArchitectureType.BONSAI_TERNARY}
+
+
+def _quantized_tensor_action(dtype_str: str, arch_type: ArchitectureType) -> int:
+    if arch_type == ArchitectureType.BONSAI:
+        return ACTION_Q1_0_128
+    if arch_type == ArchitectureType.BONSAI_TERNARY:
+        return ACTION_GROUP_TERNARY_QUANTIZE
+    if dtype_str in {"I8", "U8"}:
+        return ACTION_REPACK_TERNARY
+    return ACTION_TERNARY_QUANTIZE
 
 
 def resolve_quantize_binary() -> Path:
@@ -196,6 +211,8 @@ def build_manifest(
             is_embedding = key == config.arch_info.embedding_key
             is_lm_head = key.startswith("lm_head.")
             should_quantize = not (is_1d or is_embedding or is_lm_head)
+            if _is_bonsai_family(config.arch_type):
+                should_quantize = not is_1d
 
             padded_shape = list(shape)
             needs_padding = False
@@ -224,18 +241,12 @@ def build_manifest(
 
             if is_embedding or is_lm_head:
                 action = (
-                    ACTION_Q1_0_128
-                    if config.arch_type == ArchitectureType.BONSAI
+                    _quantized_tensor_action(dtype_str, config.arch_type)
+                    if _is_bonsai_family(config.arch_type)
                     else ACTION_BF16_RAW
                 )
             elif should_quantize:
-                action = (
-                    ACTION_Q1_0_128
-                    if config.arch_type == ArchitectureType.BONSAI
-                    else ACTION_REPACK_TERNARY
-                    if dtype_str in {"I8", "U8"}
-                    else ACTION_TERNARY_QUANTIZE
-                )
+                action = _quantized_tensor_action(dtype_str, config.arch_type)
             else:
                 action = ACTION_BF16_RAW
 

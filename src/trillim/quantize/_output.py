@@ -173,9 +173,7 @@ def write_model_metadata(
         "trillim_version": _project_version(),
         "format_version": CURRENT_FORMAT_VERSION,
         "type": "model",
-        "quantization": ("binary"
-            if config.arch_type == ArchitectureType.BONSAI
-            else "ternary"),
+        "quantization": _quantization_name(config.arch_type),
         "source_model": config.source_model,
         "architecture": config.arch_name,
         "platforms": list(_SUPPORTED_PLATFORMS),
@@ -201,9 +199,7 @@ def write_adapter_metadata(
         "trillim_version": _project_version(),
         "format_version": CURRENT_FORMAT_VERSION,
         "type": "lora_adapter",
-        "quantization": ("binary"
-            if config.arch_type == ArchitectureType.BONSAI
-            else "ternary"),
+        "quantization": _quantization_name(config.arch_type),
         "source_model": source_model,
         "architecture": config.arch_name,
         "platforms": list(_SUPPORTED_PLATFORMS),
@@ -247,6 +243,14 @@ def sys_stdout_isatty() -> bool:
 def _copy_file(source_path: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, destination)
+
+
+def _quantization_name(arch_type: ArchitectureType) -> str:
+    if arch_type == ArchitectureType.BONSAI:
+        return "binary"
+    if arch_type == ArchitectureType.BONSAI_TERNARY:
+        return "grouped-ternary"
+    return "ternary"
 
 
 def _should_skip_adapter_path(relative_path: Path) -> bool:
