@@ -12,17 +12,29 @@ from unittest.mock import patch
 
 from fastapi import APIRouter
 
-from trillim.components.tts._limits import MAX_EMITTED_AUDIO_CHUNKS, TARGET_TTS_TOKENS
+from tests.components.tts.support import make_started_tts
+from trillim.components.tts._limits import (
+    MAX_EMITTED_AUDIO_CHUNKS,
+    PCM_CHANNELS,
+    PCM_SAMPLE_RATE,
+    PCM_SAMPLE_WIDTH_BYTES,
+    TARGET_TTS_TOKENS,
+)
 from trillim.components.tts._session import _create_tts_session
-from trillim.components.tts.public import TTS, _StreamingPCMStretcher
 from trillim.components.tts._worker import WorkerFailureError
+from trillim.components.tts.public import (
+    TTS,
+    _boundary_pause_ms,
+    _pcm_silence,
+    _segment_pause_pcm,
+    _StreamingPCMStretcher,
+)
 from trillim.errors import (
     AdmissionRejectedError,
     InvalidRequestError,
     OperationCancelledError,
     SessionClosedError,
 )
-from tests.components.tts.support import make_started_tts
 
 
 class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
@@ -37,7 +49,11 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
     async def _start_tts(self, **kwargs) -> TTS:
         tts, imports_patch, builtins_patch = make_started_tts(**kwargs)
         tts._spool_dir = self.spool_dir
-        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+        with (
+            patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root),
+            builtins_patch,
+            imports_patch,
+        ):
             await tts.start()
         return tts
 
@@ -62,7 +78,11 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_requires_known_default_voice(self):
         tts, imports_patch, builtins_patch = make_started_tts(default_voice="missing")
-        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+        with (
+            patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root),
+            builtins_patch,
+            imports_patch,
+        ):
             with self.assertRaisesRegex(ValueError, "unknown default_voice"):
                 await tts.start()
 
@@ -83,7 +103,11 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
 
         tts, imports_patch, builtins_patch = make_started_tts(default_voice="custom")
         tts._spool_dir = self.spool_dir
-        with patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root), builtins_patch, imports_patch:
+        with (
+            patch("trillim.components.tts.public.VOICE_STORE_ROOT", self.voice_root),
+            builtins_patch,
+            imports_patch,
+        ):
             await tts.start()
         await tts.stop()
 
@@ -102,7 +126,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         second_source = Path(self._temp_dir.name) / "voice-2.wav"
         second_source.write_bytes(b"voice-2")
         self.assertEqual(await tts.register_voice("custompath", source), "custompath")
-        self.assertEqual(await tts.register_voice("customstr", str(second_source)), "customstr")
+        self.assertEqual(
+            await tts.register_voice("customstr", str(second_source)), "customstr"
+        )
         await tts.stop()
 
     async def test_register_voice_rejects_empty_path_objects(self):
@@ -133,7 +159,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_register_voice_rejects_invalid_audio_types(self):
         tts = await self._start_tts()
-        with self.assertRaisesRegex(InvalidRequestError, "audio must be bytes, str, or Path"):
+        with self.assertRaisesRegex(
+            InvalidRequestError, "audio must be bytes, str, or Path"
+        ):
             await tts.register_voice("custom", 123)  # type: ignore[arg-type]
         await tts.stop()
 
@@ -144,7 +172,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         tts = await self._start_tts(voice_state_builder=bad_voice_builder)
         source = Path(self._temp_dir.name) / "voice.wav"
         source.write_bytes(b"voice")
-        with self.assertRaisesRegex(InvalidRequestError, "unsupported or malformed audio input"):
+        with self.assertRaisesRegex(
+            InvalidRequestError, "unsupported or malformed audio input"
+        ):
             await tts.register_voice("custom", str(source))
         await tts.stop()
 
@@ -171,16 +201,24 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         tts = await self._start_tts(voice_state_builder=bad_voice_builder)
         source = Path(self._temp_dir.name) / "voice.wav"
         source.write_bytes(b"voice")
-        with self.assertRaisesRegex(WorkerFailureError, "backend voice builder crashed"):
+        with self.assertRaisesRegex(
+            WorkerFailureError, "backend voice builder crashed"
+        ):
             await tts.register_voice("custom", str(source))
         await tts.stop()
 
-    async def test_register_voice_does_not_report_failure_after_publish_when_upload_cleanup_fails(self):
+    async def test_register_voice_does_not_report_failure_after_publish_when_upload_cleanup_fails(
+        self,
+    ):
         tts = await self._start_tts()
         original_unlink = Path.unlink
 
         def fail_owned_upload_cleanup(path: Path, *args, **kwargs):
-            if path.parent == self.spool_dir and path.name.startswith("tts-") and path.suffix == ".audio":
+            if (
+                path.parent == self.spool_dir
+                and path.name.startswith("tts-")
+                and path.suffix == ".audio"
+            ):
                 raise PermissionError("cleanup boom")
             return original_unlink(path, *args, **kwargs)
 
@@ -212,10 +250,14 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(isinstance(chunk, bytes) for chunk in chunks))
         await tts.stop()
 
-    async def test_speak_with_speed_change_uses_multi_chunk_stretching_without_crashing(self):
-        pcm_chunk = (b"\x00\x10" * 4_800)
+    async def test_speak_with_speed_change_uses_multi_chunk_stretching_without_crashing(
+        self,
+    ):
+        pcm_chunk = b"\x00\x10" * 4_800
 
-        async def pcm_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def pcm_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del text, voice_kind, voice_reference
             return pcm_chunk
 
@@ -227,11 +269,46 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pcm) % 2, 0)
         await tts.stop()
 
+    async def test_speak_inserts_punctuation_pause_between_segments_without_trailing_silence(
+        self,
+    ):
+        async def text_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
+            del voice_kind, voice_reference
+            return text.encode("utf-8")
+
+        tts = await self._start_tts(synth=text_synth)
+        with patch("trillim.components.tts.public.random.uniform", return_value=1.0):
+            pcm = await (await tts.speak("alpha. beta.")).collect()
+
+        expected_pause = _pcm_silence(_boundary_pause_ms("alpha."))
+        self.assertEqual(pcm, b"alpha." + expected_pause + b"beta.")
+        self.assertFalse(pcm.endswith(expected_pause))
+        await tts.stop()
+
+    def test_segment_pause_pcm_scales_jittered_pause_by_speed(self):
+        with patch("trillim.components.tts.public.random.uniform", return_value=1.1):
+            pause = _segment_pause_pcm("alpha.", 2.0)
+
+        expected_duration_ms = _boundary_pause_ms("alpha.") * 1.1 / 2.0
+        expected_samples = round(PCM_SAMPLE_RATE * expected_duration_ms / 1000.0)
+        expected_length = expected_samples * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES
+        self.assertEqual(len(pause), expected_length)
+
+    def test_boundary_pause_helpers_cover_clause_and_non_boundary_cases(self):
+        self.assertEqual(_boundary_pause_ms("alpha,"), 200)
+        self.assertEqual(_boundary_pause_ms("alpha"), 0)
+        self.assertEqual(_segment_pause_pcm("alpha", 1.0), b"")
+        self.assertEqual(_pcm_silence(0), b"")
+
     async def test_second_request_is_rejected_while_running(self):
         started = asyncio.Event()
         unblock = asyncio.Event()
 
-        async def blocking_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def blocking_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del text, voice_kind, voice_reference
             started.set()
             await unblock.wait()
@@ -251,7 +328,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         tts = await self._start_tts()
         reservation = await tts._reserve_session_slot()
         await tts._release_reserved_slot(reservation)
-        with self.assertRaisesRegex(AdmissionRejectedError, "reservation is no longer active"):
+        with self.assertRaisesRegex(
+            AdmissionRejectedError, "reservation is no longer active"
+        ):
             await tts._start_reserved_session(
                 reservation,
                 "hello world",
@@ -292,7 +371,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
             "resolve_for_session",
             side_effect=resolve_for_session,
         ):
-            with self.assertRaisesRegex(AdmissionRejectedError, "reservation is no longer active"):
+            with self.assertRaisesRegex(
+                AdmissionRejectedError, "reservation is no longer active"
+            ):
                 await tts._start_reserved_session(
                     reservation,
                     "hello world",
@@ -302,7 +383,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cleanup_path.exists())
         await tts.stop()
 
-    async def test_failed_reserved_start_does_not_mask_admission_error_with_worker_close_failure(self):
+    async def test_failed_reserved_start_does_not_mask_admission_error_with_worker_close_failure(
+        self,
+    ):
         tts = await self._start_tts()
         reservation = await tts._reserve_session_slot()
         await tts._release_reserved_slot(reservation)
@@ -342,7 +425,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cleanup_path.exists())
         await tts.stop()
 
-    async def test_failed_reserved_start_does_not_mask_admission_error_with_voice_cleanup_failure(self):
+    async def test_failed_reserved_start_does_not_mask_admission_error_with_voice_cleanup_failure(
+        self,
+    ):
         tts = await self._start_tts()
         reservation = await tts._reserve_session_slot()
         await tts._release_reserved_slot(reservation)
@@ -366,14 +451,17 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
                 raise PermissionError("cleanup boom")
             return original_unlink(path, *args, **kwargs)
 
-        with patch.object(
-            tts._voice_store,
-            "resolve_for_session",
-            side_effect=resolve_for_session,
-        ), patch(
-            "pathlib.Path.unlink",
-            autospec=True,
-            side_effect=fail_voice_cleanup,
+        with (
+            patch.object(
+                tts._voice_store,
+                "resolve_for_session",
+                side_effect=resolve_for_session,
+            ),
+            patch(
+                "pathlib.Path.unlink",
+                autospec=True,
+                side_effect=fail_voice_cleanup,
+            ),
         ):
             with self.assertRaisesRegex(
                 AdmissionRejectedError,
@@ -446,7 +534,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.speed, 1.0)
         await tts.stop()
 
-    async def test_wait_for_turn_and_start_session_helpers_cover_internal_branches(self):
+    async def test_wait_for_turn_and_start_session_helpers_cover_internal_branches(
+        self,
+    ):
         tts = await self._start_tts()
         session = self._make_internal_session(tts)
         existing_task = asyncio.create_task(asyncio.sleep(0))
@@ -494,7 +584,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AdmissionRejectedError, "only one live session"):
             tts._check_can_accept_locked()
 
-    async def test_resume_session_and_set_speed_cover_remaining_scheduler_branches(self):
+    async def test_resume_session_and_set_speed_cover_remaining_scheduler_branches(
+        self,
+    ):
         tts = await self._start_tts()
         session = self._make_internal_session(tts)
 
@@ -563,7 +655,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await tts._wait_for_turn(session), 1.0)
         await tts.stop()
 
-    async def test_get_tokenizer_double_checked_lock_and_streaming_stretcher_edges(self):
+    async def test_get_tokenizer_double_checked_lock_and_streaming_stretcher_edges(
+        self,
+    ):
         calls = 0
         tokenizer = object()
 
@@ -620,8 +714,12 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         stretcher._drop_consumed_spectra(2)
 
         np_module = stretcher._np
-        stretcher._output = np_module.zeros(stretcher.frame_size * 2, dtype=np_module.float32)
-        stretcher._weights = np_module.zeros(stretcher.frame_size * 2, dtype=np_module.float32)
+        stretcher._output = np_module.zeros(
+            stretcher.frame_size * 2, dtype=np_module.float32
+        )
+        stretcher._weights = np_module.zeros(
+            stretcher.frame_size * 2, dtype=np_module.float32
+        )
         stretcher._processed_output_frames = 0
         stretcher._add_output_frame(
             np_module.zeros(stretcher.frame_size, dtype=np_module.float32)
@@ -632,7 +730,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(stretcher.finish(), bytes)
 
         broken = _StreamingPCMStretcher(1.5)
-        fake_spectrum = broken._np.zeros(broken.frame_size // 2 + 1, dtype=broken._np.complex64)
+        fake_spectrum = broken._np.zeros(
+            broken.frame_size // 2 + 1, dtype=broken._np.complex64
+        )
         broken._spectra.append(fake_spectrum)
         broken._spectra_base = 1
         broken._phase = broken._np.zeros(
@@ -643,7 +743,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         broken._process_output_frames(final=True)
 
         class _ReportedShortInput:
-            def __init__(self, np_module, *, reported_size: int, actual_size: int) -> None:
+            def __init__(
+                self, np_module, *, reported_size: int, actual_size: int
+            ) -> None:
                 self._np = np_module
                 self.size = reported_size
                 self._actual = np_module.zeros(actual_size, dtype=np_module.float32)
@@ -673,7 +775,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         first_segment_release = asyncio.Event()
         synth_calls = 0
 
-        async def gated_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def gated_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del text, voice_kind, voice_reference
             nonlocal synth_calls
             synth_calls += 1
@@ -739,7 +843,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         first_segment_started = asyncio.Event()
         first_segment_release = asyncio.Event()
 
-        async def blocking_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def blocking_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del voice_kind, voice_reference
             seen_texts.append(text)
             if len(seen_texts) == 1:
@@ -748,7 +854,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
             return text.encode("utf-8")
 
         tts = await self._start_tts(synth=blocking_synth)
-        first = await tts.speak(" ".join(f"word{index}" for index in range(TARGET_TTS_TOKENS + 2)))
+        first = await tts.speak(
+            " ".join(f"word{index}" for index in range(TARGET_TTS_TOKENS + 2))
+        )
         await first_segment_started.wait()
         await first.pause()
         first_segment_release.set()
@@ -765,7 +873,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_active_session_propagates_operation_cancelled(self):
         started = asyncio.Event()
 
-        async def hanging_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def hanging_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del text, voice_kind, voice_reference
             started.set()
             await asyncio.Future()
@@ -783,7 +893,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_cancels_live_sessions(self):
         started = asyncio.Event()
 
-        async def hanging_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def hanging_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del text, voice_kind, voice_reference
             started.set()
             await asyncio.Future()
@@ -797,7 +909,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SessionClosedError):
             await consumer
 
-    async def test_completed_sessions_ignore_pause_resume_cancel_and_speed_updates(self):
+    async def test_completed_sessions_ignore_pause_resume_cancel_and_speed_updates(
+        self,
+    ):
         tts = await self._start_tts()
         session = await tts.speak("hello world")
         self.assertTrue(await asyncio.wait_for(session.collect(), timeout=1))
@@ -818,14 +932,17 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         blocked_put = asyncio.Event()
         put_calls = 0
 
-        async def fast_synth(text: str, *, voice_kind: str, voice_reference: str) -> bytes:
+        async def fast_synth(
+            text: str, *, voice_kind: str, voice_reference: str
+        ) -> bytes:
             del text, voice_kind, voice_reference
             await allow_progress.wait()
             return b"pcm"
 
         tts = await self._start_tts(synth=fast_synth)
         text = " ".join(
-            f"word{index}" for index in range((MAX_EMITTED_AUDIO_CHUNKS + 2) * TARGET_TTS_TOKENS)
+            f"word{index}"
+            for index in range((MAX_EMITTED_AUDIO_CHUNKS + 2) * TARGET_TTS_TOKENS)
         )
         session = await tts.speak(text)
         original_put_chunk = session._put_chunk
@@ -841,9 +958,11 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         allow_progress.set()
         await asyncio.wait_for(blocked_put.wait(), timeout=1)
         await self._wait_until(
-            lambda: session._audio_queue.full()
-            and session._task is not None
-            and not session._task.done()
+            lambda: (
+                session._audio_queue.full()
+                and session._task is not None
+                and not session._task.done()
+            )
         )
         await session.pause()
         self.assertEqual(session.state, "running")
@@ -853,7 +972,9 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session._task.done())
         await tts.stop()
 
-    async def test_tampered_custom_voice_store_fails_closed_but_builtin_tts_still_works(self):
+    async def test_tampered_custom_voice_store_fails_closed_but_builtin_tts_still_works(
+        self,
+    ):
         self.voice_root.mkdir(parents=True, exist_ok=True)
         (self.voice_root / "manifest.json").write_text(
             json.dumps(
