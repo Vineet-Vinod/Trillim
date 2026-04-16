@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -171,6 +172,7 @@ def load_model_config(model_dir: Path) -> ModelQuantizeConfig:
         raise ValueError(f"Model config must be a JSON object in {config_path}")
     config = canonicalize_model_config(raw)
     arch_info = _resolve_arch_info(config)
+    arch_info = _resolve_bonsai_arch_info(model_dir, arch_info)
     tensor_names = _load_tensor_names_if_available(model_dir)
     arch_info = _resolve_bitnet_arch_info(arch_info, tensor_names)
     dimensions = _extract_dimensions(config)
@@ -225,6 +227,14 @@ def _resolve_bitnet_arch_info(
     if has_old_ffn:
         component_order[-2] = "mlp.ffn_layernorm"
     return replace(arch_info, component_order=tuple(component_order))
+
+
+def _resolve_bonsai_arch_info(model_dir: Path, arch_info: _ArchInfo) -> _ArchInfo:
+    if arch_info.arch_type != ArchitectureType.BONSAI:
+        return arch_info
+    if _readme_indicates_bonsai_ternary(model_dir):
+        return replace(arch_info, arch_type=ArchitectureType.BONSAI_TERNARY)
+    return arch_info
 
 
 def _extract_dimensions(config: dict) -> dict[str, int]:
@@ -308,6 +318,26 @@ def _load_tensor_names_if_available(model_dir: Path) -> list[str] | None:
             header = json.loads(handle.read(header_size))
         return [str(name) for name in header if name != "__metadata__"]
     return None
+
+
+def _readme_indicates_bonsai_ternary(model_dir: Path) -> bool:
+    readme_path = model_dir / "README.md"
+    if not readme_path.is_file():
+        warnings.warn(
+            (
+                f"Could not find {readme_path}; defaulting Qwen3ForCausalLM Bonsai "
+                "detection to binary. Grouped-ternary models may be misidentified."
+            ),
+            stacklevel=3,
+        )
+        return False
+    try:
+        content = readme_path.read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+    has_ternary = "ternary" in content
+    has_one_bit = any(token in content for token in ("1-bit", "1 bit", "1bit"))
+    return has_ternary and not has_one_bit
 
 
 def _align_to_128(value: int) -> int:

@@ -28,6 +28,7 @@ class ArchitectureType(IntEnum):
     LLAMA = 2
     QWEN35 = 3
     BONSAI = 4
+    BONSAI_TERNARY = 5
 
 
 class ActivationType(IntEnum):
