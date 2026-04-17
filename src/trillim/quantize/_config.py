@@ -159,6 +159,8 @@ class ModelQuantizeConfig:
     norm_eps: float
     rope_theta: float
     partial_rotary_factor: float
+    yarn_factor: float | None
+    original_max_position_embeddings: int | None
     tie_word_embeddings: bool
     source_model: str
 
@@ -178,6 +180,7 @@ def load_model_config(model_dir: Path) -> ModelQuantizeConfig:
     dimensions = _extract_dimensions(config)
     rope_theta = _resolve_rope_theta(config)
     partial_rotary_factor = _resolve_partial_rotary_factor(config)
+    yarn_factor, original_max_position_embeddings = _resolve_yarn_scaling(config)
     _resolve_activation(config)
     tie_word_embeddings = _resolve_tied_embeddings(config, tensor_names)
     return ModelQuantizeConfig(
@@ -197,6 +200,8 @@ def load_model_config(model_dir: Path) -> ModelQuantizeConfig:
         norm_eps=float(config.get("rms_norm_eps", config.get("layer_norm_epsilon", 1e-6))),
         rope_theta=rope_theta,
         partial_rotary_factor=partial_rotary_factor,
+        yarn_factor=yarn_factor,
+        original_max_position_embeddings=original_max_position_embeddings,
         tie_word_embeddings=tie_word_embeddings,
         source_model=str(raw.get("_name_or_path", "")),
     )
@@ -287,6 +292,22 @@ def _resolve_partial_rotary_factor(config: dict) -> float:
         return float(rope_parameters["partial_rotary_factor"])
     factor = config.get("partial_rotary_factor", 1.0)
     return float(factor)
+
+
+def _resolve_yarn_scaling(config: dict) -> tuple[float | None, int | None]:
+    rope_scaling = config.get("rope_scaling")
+    if not isinstance(rope_scaling, dict):
+        return None, None
+    if rope_scaling.get("rope_type") != "yarn":
+        return None, None
+    factor = rope_scaling.get("factor")
+    original_max_position_embeddings = rope_scaling.get("original_max_position_embeddings")
+    if factor is None or original_max_position_embeddings is None:
+        raise ValueError("YaRN rope_scaling requires factor and original_max_position_embeddings")
+    return float(factor), _require_positive_int(
+        original_max_position_embeddings,
+        "rope_scaling.original_max_position_embeddings",
+    )
 
 
 def _resolve_activation(config: dict) -> str:
