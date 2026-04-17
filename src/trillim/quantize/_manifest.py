@@ -397,6 +397,15 @@ def run_model_quantizer(
         "--rope-dim",
         str(int(round(config.head_dim * config.partial_rotary_factor))),
     ]
+    if config.yarn_factor is not None and config.original_max_position_embeddings is not None:
+        command.extend(
+            [
+                "--yarn-factor",
+                str(config.yarn_factor),
+                "--yarn-orig-max-pos",
+                str(config.original_max_position_embeddings),
+            ]
+        )
     if config.tie_word_embeddings:
         command.append("--tie-embeddings")
     try:
