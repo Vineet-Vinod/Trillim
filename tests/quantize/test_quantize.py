@@ -1202,6 +1202,8 @@ class QuantizeInternalTests(unittest.TestCase):
             self.assertEqual(config.max_position_embeddings, 4096)
             self.assertEqual(config.rope_theta, 10000.0)
             self.assertEqual(config.partial_rotary_factor, 1.0)
+            self.assertIsNone(config.yarn_factor)
+            self.assertIsNone(config.original_max_position_embeddings)
             self.assertFalse(config.tie_word_embeddings)
             self.assertEqual(config.source_model, "")
 
@@ -1228,6 +1230,31 @@ class QuantizeInternalTests(unittest.TestCase):
                 quantize_config._resolve_partial_rotary_factor({"partial_rotary_factor": 0.5}),
                 0.5,
             )
+            self.assertEqual(
+                quantize_config._resolve_yarn_scaling(
+                    {
+                        "rope_scaling": {
+                            "rope_type": "yarn",
+                            "factor": 4.0,
+                            "original_max_position_embeddings": 8192,
+                        }
+                    }
+                ),
+                (4.0, 8192),
+            )
+            self.assertEqual(
+                quantize_config._resolve_yarn_scaling(
+                    {"rope_scaling": {"rope_type": "linear", "factor": 8.0}}
+                ),
+                (None, None),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "YaRN rope_scaling requires factor and original_max_position_embeddings",
+            ):
+                quantize_config._resolve_yarn_scaling(
+                    {"rope_scaling": {"rope_type": "yarn", "factor": 4.0}}
+                )
             self.assertFalse(quantize_config._resolve_tied_embeddings({}, None))
             self.assertEqual(
                 quantize_config.layer_index_for_key(
@@ -1249,6 +1276,33 @@ class QuantizeInternalTests(unittest.TestCase):
                 with self.subTest(invalid_value=invalid_value):
                     with self.assertRaisesRegex(ValueError, "positive integer"):
                         quantize_config._require_positive_int(invalid_value, "bad")
+
+    def test_load_model_config_parses_yarn_rope_scaling(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = _write_config_only_model(
+                root,
+                payload={
+                    "architectures": ["LlamaForCausalLM"],
+                    "hidden_size": 128,
+                    "intermediate_size": 256,
+                    "num_attention_heads": 4,
+                    "num_hidden_layers": 2,
+                    "vocab_size": 64,
+                    "max_position_embeddings": 32768,
+                    "rope_scaling": {
+                        "rope_type": "yarn",
+                        "factor": 4.0,
+                        "original_max_position_embeddings": 8192,
+                    },
+                },
+            )
+
+            config = entrypoint.load_model_config(model_dir)
+
+            self.assertEqual(config.yarn_factor, 4.0)
+            self.assertEqual(config.original_max_position_embeddings, 8192)
+            self.assertEqual(config.max_position_embeddings, 32768)
 
     def test_quantize_config_load_tensor_names_and_legacy_bitnet_variants(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1878,6 +1932,31 @@ class QuantizeInternalTests(unittest.TestCase):
                     language_model_only=False,
                 )
             self.assertIn("--tie-embeddings", recorded_commands[0])
+            self.assertNotIn("--yarn-factor", recorded_commands[0])
+            self.assertFalse(manifest_path.exists())
+            self.assertFalse(temp_path.exists())
+
+            manifest_path.write_bytes(b"manifest")
+            temp_path.write_bytes(b"temp")
+            with patch("trillim.quantize._manifest.build_manifest", return_value=manifest_path), patch(
+                "trillim.quantize._manifest.subprocess.run",
+                side_effect=fake_run,
+            ):
+                manifest.run_model_quantizer(
+                    Path("/tmp/binary"),
+                    model_dir,
+                    replace(
+                        config,
+                        yarn_factor=4.0,
+                        original_max_position_embeddings=8192,
+                    ),
+                    output_dir=command_output_dir,
+                    language_model_only=False,
+                )
+            self.assertIn("--yarn-factor", recorded_commands[-1])
+            self.assertIn("4.0", recorded_commands[-1])
+            self.assertIn("--yarn-orig-max-pos", recorded_commands[-1])
+            self.assertIn("8192", recorded_commands[-1])
             self.assertFalse(manifest_path.exists())
             self.assertFalse(temp_path.exists())
 
