@@ -122,3 +122,15 @@ class LLMConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(load_sampling_defaults(root).max_tokens, MAX_OUTPUT_TOKENS)
+
+    def test_load_sampling_defaults_accepts_zero_max_tokens_as_unlimited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "generation_config.json").write_text(
+                json.dumps({"max_new_tokens": 0}),
+                encoding="utf-8",
+            )
+
+            defaults = load_sampling_defaults(root)
+
+        self.assertEqual(defaults.max_tokens, 0)

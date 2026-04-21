@@ -79,6 +79,19 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(sampling.rep_penalty_lookback, 0)
         self.assertEqual(large_sampling.rep_penalty_lookback, 512)
 
+    def test_validate_sampling_options_accepts_zero_max_tokens_as_unlimited(self):
+        sampling = validate_sampling_options(max_tokens=0)
+        request = validate_chat_request(
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 0,
+            },
+            active_model_name=None,
+        )
+
+        self.assertEqual(sampling.max_tokens, 0)
+        self.assertEqual(request.max_tokens, 0)
+
     def test_validate_swap_request_rejects_unknown_harness_name(self):
         with self.assertRaisesRegex(InvalidRequestError, "Unknown harness"):
             validate_swap_request(

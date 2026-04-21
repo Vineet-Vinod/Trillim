@@ -341,8 +341,8 @@ class ChatSessionTests(unittest.IsolatedAsyncioTestCase):
 
         task = asyncio.create_task(consume())
         await started.wait()
-        with self.assertRaisesRegex(InvalidRequestError, "greater than or equal to 1"):
-            await invalid_session.chat(max_tokens=0)
+        with self.assertRaisesRegex(InvalidRequestError, "greater than or equal to 0"):
+            await invalid_session.chat(max_tokens=-1)
         release.set()
         await task
         await llm.stop()

@@ -254,6 +254,16 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(engine.last_completion_tokens, 1)
         self.assertEqual(engine.cached_token_ids, [1, 2, 99, 65])
 
+    async def test_generate_defaults_to_unlimited_max_tokens(self):
+        engine = self._make_engine()
+        engine.process = _FakeProcess(lines=[b"65\n", b"0\n", b"2\n"])
+
+        tokens = [token async for token in engine.generate([1])]
+
+        self.assertEqual(tokens, [65])
+        request_block = engine.process.stdin.writes[0].decode("utf-8")
+        self.assertIn("max_tokens=0\n", request_block)
+
     async def test_generate_resets_cache_when_prompt_prefix_diverges(self):
         engine = self._make_engine()
         engine.process = _FakeProcess(lines=[b"65\n", b"0\n", b"3\n"])
