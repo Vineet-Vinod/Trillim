@@ -33,7 +33,7 @@ class SamplingOptions(BaseModel):
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     repetition_penalty: float | None = Field(default=None, gt=0.0, le=2.0)
     rep_penalty_lookback: int | None = Field(default=None, ge=0)
-    max_tokens: int | None = Field(default=None, ge=1, le=MAX_OUTPUT_TOKENS)
+    max_tokens: int | None = Field(default=None, ge=0, le=MAX_OUTPUT_TOKENS)
 
     def to_kwargs(self) -> dict[str, float | int | None]:
         """Convert the model to plain kwargs."""

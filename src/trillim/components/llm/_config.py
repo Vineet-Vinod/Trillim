@@ -122,7 +122,7 @@ def load_sampling_defaults(model_dir: Path) -> SamplingDefaults:
     if isinstance(max_tokens, bool):
         max_tokens = defaults.max_tokens
     if isinstance(max_tokens, int):
-        max_tokens = max(1, min(max_tokens, MAX_OUTPUT_TOKENS))
+        max_tokens = max(0, min(max_tokens, MAX_OUTPUT_TOKENS))
     else:
         max_tokens = defaults.max_tokens
     return SamplingDefaults(
