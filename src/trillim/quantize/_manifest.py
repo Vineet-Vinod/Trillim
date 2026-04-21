@@ -406,6 +406,10 @@ def run_model_quantizer(
                 str(config.original_max_position_embeddings),
             ]
         )
+    if config.yarn_beta_slow is not None:
+        command.extend(["--yarn-beta-slow", str(config.yarn_beta_slow)])
+    if config.yarn_beta_fast is not None:
+        command.extend(["--yarn-beta-fast", str(config.yarn_beta_fast)])
     if config.tie_word_embeddings:
         command.append("--tie-embeddings")
     try:

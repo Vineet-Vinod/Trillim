@@ -161,6 +161,8 @@ class ModelQuantizeConfig:
     partial_rotary_factor: float
     yarn_factor: float | None
     original_max_position_embeddings: int | None
+    yarn_beta_slow: float | None
+    yarn_beta_fast: float | None
     tie_word_embeddings: bool
     source_model: str
 
@@ -180,7 +182,12 @@ def load_model_config(model_dir: Path) -> ModelQuantizeConfig:
     dimensions = _extract_dimensions(config)
     rope_theta = _resolve_rope_theta(config)
     partial_rotary_factor = _resolve_partial_rotary_factor(config)
-    yarn_factor, original_max_position_embeddings = _resolve_yarn_scaling(config)
+    (
+        yarn_factor,
+        original_max_position_embeddings,
+        yarn_beta_slow,
+        yarn_beta_fast,
+    ) = _resolve_yarn_scaling(config)
     _resolve_activation(config)
     tie_word_embeddings = _resolve_tied_embeddings(config, tensor_names)
     return ModelQuantizeConfig(
@@ -202,6 +209,8 @@ def load_model_config(model_dir: Path) -> ModelQuantizeConfig:
         partial_rotary_factor=partial_rotary_factor,
         yarn_factor=yarn_factor,
         original_max_position_embeddings=original_max_position_embeddings,
+        yarn_beta_slow=yarn_beta_slow,
+        yarn_beta_fast=yarn_beta_fast,
         tie_word_embeddings=tie_word_embeddings,
         source_model=str(raw.get("_name_or_path", "")),
     )
@@ -294,19 +303,28 @@ def _resolve_partial_rotary_factor(config: dict) -> float:
     return float(factor)
 
 
-def _resolve_yarn_scaling(config: dict) -> tuple[float | None, int | None]:
+def _resolve_yarn_scaling(
+    config: dict,
+) -> tuple[float | None, int | None, float | None, float | None]:
     rope_scaling = config.get("rope_scaling")
     if not isinstance(rope_scaling, dict):
-        return None, None
+        return None, None, None, None
     if rope_scaling.get("rope_type") != "yarn":
-        return None, None
+        return None, None, None, None
     factor = rope_scaling.get("factor")
     original_max_position_embeddings = rope_scaling.get("original_max_position_embeddings")
+    beta_slow = rope_scaling.get("beta_slow")
+    beta_fast = rope_scaling.get("beta_fast")
     if factor is None or original_max_position_embeddings is None:
         raise ValueError("YaRN rope_scaling requires factor and original_max_position_embeddings")
-    return float(factor), _require_positive_int(
-        original_max_position_embeddings,
-        "rope_scaling.original_max_position_embeddings",
+    return (
+        float(factor),
+        _require_positive_int(
+            original_max_position_embeddings,
+            "rope_scaling.original_max_position_embeddings",
+        ),
+        None if beta_slow is None else float(beta_slow),
+        None if beta_fast is None else float(beta_fast),
     )
 
 
