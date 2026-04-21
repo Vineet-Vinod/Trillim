@@ -1204,6 +1204,8 @@ class QuantizeInternalTests(unittest.TestCase):
             self.assertEqual(config.partial_rotary_factor, 1.0)
             self.assertIsNone(config.yarn_factor)
             self.assertIsNone(config.original_max_position_embeddings)
+            self.assertIsNone(config.yarn_beta_slow)
+            self.assertIsNone(config.yarn_beta_fast)
             self.assertFalse(config.tie_word_embeddings)
             self.assertEqual(config.source_model, "")
 
@@ -1237,16 +1239,30 @@ class QuantizeInternalTests(unittest.TestCase):
                             "rope_type": "yarn",
                             "factor": 4.0,
                             "original_max_position_embeddings": 8192,
+                            "beta_slow": 1.0,
+                            "beta_fast": 32.0,
                         }
                     }
                 ),
-                (4.0, 8192),
+                (4.0, 8192, 1.0, 32.0),
+            )
+            self.assertEqual(
+                quantize_config._resolve_yarn_scaling(
+                    {
+                        "rope_scaling": {
+                            "rope_type": "yarn",
+                            "factor": 4.0,
+                            "original_max_position_embeddings": 8192,
+                        }
+                    }
+                ),
+                (4.0, 8192, None, None),
             )
             self.assertEqual(
                 quantize_config._resolve_yarn_scaling(
                     {"rope_scaling": {"rope_type": "linear", "factor": 8.0}}
                 ),
-                (None, None),
+                (None, None, None, None),
             )
             with self.assertRaisesRegex(
                 ValueError,
@@ -1294,6 +1310,8 @@ class QuantizeInternalTests(unittest.TestCase):
                         "rope_type": "yarn",
                         "factor": 4.0,
                         "original_max_position_embeddings": 8192,
+                        "beta_slow": 1.0,
+                        "beta_fast": 32.0,
                     },
                 },
             )
@@ -1302,6 +1320,8 @@ class QuantizeInternalTests(unittest.TestCase):
 
             self.assertEqual(config.yarn_factor, 4.0)
             self.assertEqual(config.original_max_position_embeddings, 8192)
+            self.assertEqual(config.yarn_beta_slow, 1.0)
+            self.assertEqual(config.yarn_beta_fast, 32.0)
             self.assertEqual(config.max_position_embeddings, 32768)
 
     def test_quantize_config_load_tensor_names_and_legacy_bitnet_variants(self):
@@ -1452,6 +1472,10 @@ class QuantizeInternalTests(unittest.TestCase):
             self.assertEqual(config.arch_type, quantize_config.ArchitectureType.BONSAI)
             self.assertEqual(len(caught), 1)
             self.assertIn("defaulting Qwen3ForCausalLM Bonsai detection to binary", str(caught[0].message))
+
+            (model_dir / "README.md").write_text("Ternary Bonsai release model.", encoding="utf-8")
+            with patch.object(Path, "read_text", side_effect=OSError):
+                self.assertFalse(quantize_config._readme_indicates_bonsai_ternary(model_dir))
 
     def test_manifest_discovery_and_tensor_sorting_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1949,6 +1973,8 @@ class QuantizeInternalTests(unittest.TestCase):
                         config,
                         yarn_factor=4.0,
                         original_max_position_embeddings=8192,
+                        yarn_beta_slow=1.0,
+                        yarn_beta_fast=32.0,
                     ),
                     output_dir=command_output_dir,
                     language_model_only=False,
@@ -1957,6 +1983,28 @@ class QuantizeInternalTests(unittest.TestCase):
             self.assertIn("4.0", recorded_commands[-1])
             self.assertIn("--yarn-orig-max-pos", recorded_commands[-1])
             self.assertIn("8192", recorded_commands[-1])
+            self.assertIn("--yarn-beta-slow", recorded_commands[-1])
+            self.assertIn("1.0", recorded_commands[-1])
+            self.assertIn("--yarn-beta-fast", recorded_commands[-1])
+            self.assertIn("32.0", recorded_commands[-1])
+            self.assertFalse(manifest_path.exists())
+            self.assertFalse(temp_path.exists())
+
+            manifest_path.write_bytes(b"manifest")
+            temp_path.write_bytes(b"temp")
+            with patch("trillim.quantize._manifest.build_manifest", return_value=manifest_path), patch(
+                "trillim.quantize._manifest.subprocess.run",
+                side_effect=fake_run,
+            ):
+                manifest.run_model_quantizer(
+                    Path("/tmp/binary"),
+                    model_dir,
+                    replace(config, yarn_beta_slow=1.0),
+                    output_dir=command_output_dir,
+                    language_model_only=False,
+                )
+            self.assertIn("--yarn-beta-slow", recorded_commands[-1])
+            self.assertNotIn("--yarn-beta-fast", recorded_commands[-1])
             self.assertFalse(manifest_path.exists())
             self.assertFalse(temp_path.exists())
 
