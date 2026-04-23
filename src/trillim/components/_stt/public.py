@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from asyncio import AbstractEventLoop
+from pathlib import Path
 
 from trillim.components._stt._engine import STTEngine
 from trillim.components._stt._session import AudioSession, _create_audio_session
-from trillim.errors import ComponentLifecycleError
+from trillim.errors import ComponentLifecycleError, InvalidRequestError
 
 
 class STT:
@@ -42,6 +43,23 @@ class STT:
             raise ComponentLifecycleError("STT is not running")
         return _create_audio_session(self)
 
+    async def transcribe_bytes(
+        self,
+        audio_bytes: bytes,
+        *,
+        language: str | None = None,
+    ) -> str:
+        return await self.open_session().transcribe(audio_bytes, language=language)
+
+    async def transcribe_file(
+        self,
+        path: str | Path,
+        *,
+        language: str | None = None,
+    ) -> str:
+        source_path = self._validate_source_file(path)
+        return await self.open_session().transcribe(source_path.read_bytes(), language=language)
+
     async def _transcribe(self, pcm: bytes, *, language: str | None = None) -> str:
         self._require_owner_loop()
         if not self._started or self._stop_event.is_set():
@@ -60,3 +78,8 @@ class STT:
             raise ComponentLifecycleError(
                 "STT is bound to one event loop; create a new STT per thread/event loop"
             )
+
+    def _validate_source_file(self, path: str | Path) -> Path:
+        if isinstance(path, str) and not path:
+            raise InvalidRequestError("path is required")
+        return Path(path).expanduser()
