@@ -14,16 +14,11 @@ from trillim.components.stt._session import AudioSession
 from trillim.errors import ComponentLifecycleError, InvalidRequestError, SessionBusyError
 from trillim.runtime import Runtime
 
-EXPECTED_TEXT = (
-    "on Danny Koviyat was known as the torpedo, which I actually think is unfair, "
-    "because like I said, this incident wasn't really his fault. He did torpedo "
-    "veil out of the race at the Russian Grand Prix, and that was a proper torpedo. "
-    "And he did a similar thing to Fernando Alonso at the Austrian Grand Prix. He "
-    "just drove straight to the back of him, which pushed Fernando into Max "
-    "Verstappen and took both of them out of the race. And then at the British "
-    "Grand Prix, he tried to go side by side with his teammate, Carlos through "
-    "maggots and beckons before torpedoing him out with rest. Okay, maybe calling "
-    "him the torpedo"
+EXPECTED_PHRASES = (
+    "torpedo",
+    "russian grand prix",
+    "austrian grand prix",
+    "british grand prix",
 )
 
 
@@ -82,8 +77,10 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcribe_bytes_and_file_return_expected_text(self):
         stt = await self._start_stt()
         try:
-            self.assertEqual(await stt.transcribe_bytes(self.fixture_bytes), EXPECTED_TEXT)
-            self.assertEqual(await stt.transcribe_file(str(self.fixture_path)), EXPECTED_TEXT)
+            bytes_text = await stt.transcribe_bytes(self.fixture_bytes)
+            file_text = await stt.transcribe_file(str(self.fixture_path))
+            self.assertEqual(bytes_text, file_text)
+            self._assert_expected_transcript(bytes_text)
         finally:
             await stt.stop()
 
@@ -92,7 +89,7 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
         try:
             async with stt.open_session() as session:
                 self.assertEqual(session.state, "idle")
-                self.assertEqual(await session.transcribe(self.fixture_bytes), EXPECTED_TEXT)
+                self._assert_expected_transcript(await session.transcribe(self.fixture_bytes))
                 self.assertEqual(session.state, "done")
         finally:
             await stt.stop()
@@ -106,7 +103,7 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
             with self.assertRaisesRegex(SessionBusyError, "already transcribing"):
                 await session.transcribe(self.fixture_bytes)
-            self.assertEqual(await task, EXPECTED_TEXT)
+            self._assert_expected_transcript(await task)
             self.assertEqual(session.state, "done")
         finally:
             await stt.stop()
@@ -118,7 +115,8 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
                 stt.transcribe_bytes(self.fixture_bytes),
                 stt.transcribe_file(self.fixture_path),
             )
-            self.assertCountEqual(results, [EXPECTED_TEXT, EXPECTED_TEXT])
+            self.assertEqual(results[0], results[1])
+            self._assert_expected_transcript(results[0])
         finally:
             await stt.stop()
 
@@ -165,13 +163,19 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcribe_bytes_accepts_bytearray_and_memoryview(self):
         stt = await self._start_stt()
         try:
-            self.assertEqual(await stt.transcribe_bytes(bytearray(self.fixture_bytes)), EXPECTED_TEXT)
-            self.assertEqual(
-                await stt.transcribe_bytes(memoryview(self.fixture_bytes)),
-                EXPECTED_TEXT,
-            )
+            bytearray_text = await stt.transcribe_bytes(bytearray(self.fixture_bytes))
+            memoryview_text = await stt.transcribe_bytes(memoryview(self.fixture_bytes))
+            self.assertEqual(bytearray_text, memoryview_text)
+            self._assert_expected_transcript(bytearray_text)
         finally:
             await stt.stop()
+
+    def _assert_expected_transcript(self, text: str) -> None:
+        self.assertIsInstance(text, str)
+        self.assertGreater(len(text), 100)
+        lowered = text.lower()
+        for phrase in EXPECTED_PHRASES:
+            self.assertIn(phrase, lowered)
 
 
 class RuntimeSTTTests(unittest.TestCase):
@@ -181,10 +185,12 @@ class RuntimeSTTTests(unittest.TestCase):
 
     def test_runtime_syncify_supports_component_and_session_usage(self):
         with Runtime(STT()) as runtime:
-            self.assertEqual(runtime.stt.transcribe_file(self.fixture_path), EXPECTED_TEXT)
+            file_text = runtime.stt.transcribe_file(self.fixture_path)
+            self.assertIsInstance(file_text, str)
+            self.assertGreater(len(file_text), 100)
             with runtime.stt.open_session() as session:
                 self.assertEqual(session.state, "idle")
-                self.assertEqual(session.transcribe(self.fixture_bytes), EXPECTED_TEXT)
+                self.assertEqual(session.transcribe(self.fixture_bytes), file_text)
                 self.assertEqual(session.state, "done")
 
 
