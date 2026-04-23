@@ -12,41 +12,41 @@ from trillim.errors import InvalidRequestError, SessionBusyError
 if TYPE_CHECKING:
     from trillim.components.stt.public import STT
 
-_AUDIO_SESSION_OWNER_TOKEN = object()
-_AUDIO_SESSION_CONSTRUCTION_ERROR = (
-    "AudioSession cannot be constructed directly; use STT.open_session()"
+_STT_SESSION_OWNER_TOKEN = object()
+_STT_SESSION_CONSTRUCTION_ERROR = (
+    "STTSession cannot be constructed directly; use STT.open_session()"
 )
-_ALLOW_AUDIO_SESSION_SUBCLASS = False
+_ALLOW_STT_SESSION_SUBCLASS = False
 _PCM_WIDTH_BYTES = 2
 _PCM_CHANNELS = 1
 _PCM_SAMPLE_RATE = 16000
 
 
-class _AudioSessionFSM(Enum):
+class _STTSessionFSM(Enum):
     IDLE = "idle"
     TRANSCRIBING = "transcribing"
     DONE = "done"
 
 
-def _create_audio_session(stt: STT) -> _AudioSession:
-    return _AudioSession(stt, _owner_token=_AUDIO_SESSION_OWNER_TOKEN)
+def _create_stt_session(stt: STT) -> _STTSession:
+    return _STTSession(stt, _owner_token=_STT_SESSION_OWNER_TOKEN)
 
 
-class AudioSession(abc.ABC):
-    """Public audio-session handle returned by the STT component."""
+class STTSession(abc.ABC):
+    """Public STT session handle returned by the STT component."""
 
     _runtime_proxy = True
 
     def __init_subclass__(cls, **kwargs) -> None:
         del kwargs
         super().__init_subclass__()
-        if not _ALLOW_AUDIO_SESSION_SUBCLASS:
-            raise TypeError("AudioSession cannot be subclassed publicly")
+        if not _ALLOW_STT_SESSION_SUBCLASS:
+            raise TypeError("STTSession cannot be subclassed publicly")
 
     def __new__(cls, *args, **kwargs):
         del args, kwargs
-        if cls is AudioSession:
-            raise TypeError(_AUDIO_SESSION_CONSTRUCTION_ERROR)
+        if cls is STTSession:
+            raise TypeError(_STT_SESSION_CONSTRUCTION_ERROR)
         return super().__new__(cls)
 
     @property
@@ -55,7 +55,7 @@ class AudioSession(abc.ABC):
         ...
 
     @abc.abstractmethod
-    async def __aenter__(self) -> AudioSession:
+    async def __aenter__(self) -> STTSession:
         ...
 
     @abc.abstractmethod
@@ -71,29 +71,29 @@ class AudioSession(abc.ABC):
         ...
 
 
-_ALLOW_AUDIO_SESSION_SUBCLASS = True
+_ALLOW_STT_SESSION_SUBCLASS = True
 
 
-class _AudioSession(AudioSession):
-    """Private concrete audio-session implementation owned by one STT runtime."""
+class _STTSession(STTSession):
+    """Private concrete STT session implementation owned by one STT runtime."""
 
     def __new__(cls, stt: STT, *, _owner_token=None):
         del stt
-        if _owner_token is not _AUDIO_SESSION_OWNER_TOKEN:
-            raise TypeError(_AUDIO_SESSION_CONSTRUCTION_ERROR)
+        if _owner_token is not _STT_SESSION_OWNER_TOKEN:
+            raise TypeError(_STT_SESSION_CONSTRUCTION_ERROR)
         return super().__new__(cls)
 
     def __init__(self, stt: STT, *, _owner_token=None) -> None:
-        if _owner_token is not _AUDIO_SESSION_OWNER_TOKEN:
-            raise TypeError(_AUDIO_SESSION_CONSTRUCTION_ERROR)
+        if _owner_token is not _STT_SESSION_OWNER_TOKEN:
+            raise TypeError(_STT_SESSION_CONSTRUCTION_ERROR)
         self._stt = stt
-        self._state = _AudioSessionFSM.IDLE
+        self._state = _STTSessionFSM.IDLE
 
     @property
     def state(self) -> str:
         return self._state.value
 
-    async def __aenter__(self) -> AudioSession:
+    async def __aenter__(self) -> STTSession:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -104,10 +104,10 @@ class _AudioSession(AudioSession):
         return None
 
     async def transcribe(self, audio: bytes, *, language: str | None = None) -> str:
-        if self._state is _AudioSessionFSM.TRANSCRIBING:
-            raise SessionBusyError("AudioSession is already transcribing")
+        if self._state is _STTSessionFSM.TRANSCRIBING:
+            raise SessionBusyError("STTSession is already transcribing")
 
-        self._state = _AudioSessionFSM.TRANSCRIBING
+        self._state = _STTSessionFSM.TRANSCRIBING
         try:
             if self._stopped():
                 return ""
@@ -116,7 +116,7 @@ class _AudioSession(AudioSession):
                 return ""
             return await self._stt._transcribe(pcm, language=language)
         finally:
-            self._state = _AudioSessionFSM.DONE
+            self._state = _STTSessionFSM.DONE
 
     def _normalize_audio(self, audio: bytes) -> bytes:
         if isinstance(audio, bytearray):
@@ -208,4 +208,4 @@ class _AudioSession(AudioSession):
         return bool(stop_event is not None and stop_event.is_set())
 
 
-_ALLOW_AUDIO_SESSION_SUBCLASS = False
+_ALLOW_STT_SESSION_SUBCLASS = False

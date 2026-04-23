@@ -13,7 +13,7 @@ from trillim.components.stt._limits import (
     UPLOAD_PROGRESS_TIMEOUT_SECONDS,
 )
 from trillim.components.stt._router import build_router
-from trillim.components.stt._session import AudioSession, _create_audio_session
+from trillim.components.stt._session import STTSession, _create_stt_session
 from trillim.components.stt._validation import PayloadTooLargeError, validate_http_request
 from trillim.errors import ComponentLifecycleError, InvalidRequestError, ProgressTimeoutError
 
@@ -53,11 +53,11 @@ class STT(Component):
                 await self._engine.stop()
         await self._router_admission.wait_for_idle()
 
-    def open_session(self) -> AudioSession:
+    def open_session(self) -> STTSession:
         self._require_owner_loop()
         if not self._started or self._stop_event.is_set():
             raise ComponentLifecycleError("STT is not running")
-        return _create_audio_session(self)
+        return _create_stt_session(self)
 
     async def transcribe_bytes(
         self,

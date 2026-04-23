@@ -8,9 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from trillim.components.stt import STT
+from trillim.components.stt import STT, STTSession
 from trillim.components.stt._engine import STTEngine
-from trillim.components.stt._session import AudioSession
 from trillim.errors import ComponentLifecycleError, InvalidRequestError, SessionBusyError
 from trillim.runtime import Runtime
 
@@ -195,9 +194,9 @@ class RuntimeSTTTests(unittest.TestCase):
 
 
 class SessionAndEngineContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_audio_session_cannot_be_constructed_directly(self):
+    async def test_stt_session_cannot_be_constructed_directly(self):
         with self.assertRaises(TypeError):
-            AudioSession()
+            STTSession()
 
     async def test_engine_public_lifecycle_contract(self):
         engine = STTEngine()
