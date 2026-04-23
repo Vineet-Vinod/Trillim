@@ -12,6 +12,8 @@ from pathlib import Path
 from trillim._bundle_metadata import canonicalize_model_config
 from trillim.components.llm._config import ArchitectureType
 
+_SOURCE_METADATA_NAME = "trillim_source.json"
+
 LORA_TARGETS = (
     "self_attn.k_proj",
     "self_attn.v_proj",
@@ -246,9 +248,19 @@ def _resolve_bitnet_arch_info(
 def _resolve_bonsai_arch_info(model_dir: Path, arch_info: _ArchInfo) -> _ArchInfo:
     if arch_info.arch_type != ArchitectureType.QWEN3:
         return arch_info
-    bonsai_arch_type = _readme_bonsai_arch_type(model_dir)
-    if bonsai_arch_type is not None:
-        return replace(arch_info, arch_type=bonsai_arch_type)
+    source_arch_type = _source_arch_type(model_dir)
+    if source_arch_type is not None:
+        return replace(arch_info, arch_type=source_arch_type)
+    legacy_arch_type = _legacy_readme_bonsai_arch_type(model_dir)
+    if legacy_arch_type is not None:
+        warnings.warn(
+            (
+                f"README-based Bonsai detection is deprecated for {model_dir}. "
+                f"Add {_SOURCE_METADATA_NAME} with an explicit architecture marker."
+            ),
+            stacklevel=3,
+        )
+        return replace(arch_info, arch_type=legacy_arch_type)
     return arch_info
 
 
@@ -360,16 +372,30 @@ def _load_tensor_names_if_available(model_dir: Path) -> list[str] | None:
     return None
 
 
-def _readme_bonsai_arch_type(model_dir: Path) -> ArchitectureType | None:
+def _source_arch_type(model_dir: Path) -> ArchitectureType | None:
+    source_metadata_path = model_dir / _SOURCE_METADATA_NAME
+    if not source_metadata_path.is_file():
+        return None
+    payload = json.loads(source_metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Source metadata must be a JSON object in {source_metadata_path}")
+    architecture = str(payload.get("architecture", "")).strip().lower()
+    if architecture == "":
+        raise ValueError(f"Source metadata is missing 'architecture' in {source_metadata_path}")
+    if architecture == "qwen3":
+        return ArchitectureType.QWEN3
+    if architecture == "bonsai":
+        return ArchitectureType.BONSAI
+    if architecture == "bonsai_ternary":
+        return ArchitectureType.BONSAI_TERNARY
+    raise ValueError(
+        f"Unsupported source architecture marker {architecture!r} in {source_metadata_path}"
+    )
+
+
+def _legacy_readme_bonsai_arch_type(model_dir: Path) -> ArchitectureType | None:
     readme_path = model_dir / "README.md"
     if not readme_path.is_file():
-        warnings.warn(
-            (
-                f"Could not find {readme_path}; defaulting Qwen3ForCausalLM "
-                "detection to dense Qwen3. Bonsai checkpoints require README markers."
-            ),
-            stacklevel=3,
-        )
         return None
     try:
         content = readme_path.read_text(encoding="utf-8").lower()
@@ -385,7 +411,10 @@ def _readme_bonsai_arch_type(model_dir: Path) -> ArchitectureType | None:
 
 
 def _readme_indicates_bonsai_ternary(model_dir: Path) -> bool:
-    return _readme_bonsai_arch_type(model_dir) == ArchitectureType.BONSAI_TERNARY
+    source_arch_type = _source_arch_type(model_dir)
+    if source_arch_type is not None:
+        return source_arch_type == ArchitectureType.BONSAI_TERNARY
+    return _legacy_readme_bonsai_arch_type(model_dir) == ArchitectureType.BONSAI_TERNARY
 
 
 def _align_to_128(value: int) -> int:

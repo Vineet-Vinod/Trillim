@@ -169,6 +169,8 @@ If the second positional argument is present, the command quantizes the adapter.
 
 Additional notes:
 
+- Bonsai source checkpoints should include `trillim_source.json` in the model root with `"architecture": "bonsai"` or `"architecture": "bonsai_ternary"`.
+- Legacy README-based Bonsai detection still works for older checkpoints, but it is deprecated.
 - Qwen3-based Bonsai checkpoints are supported, including Bonsai 1-bit (binary) and grouped-ternary bundles.
 - Bonsai bundles use binary or grouped-ternary quantization metadata. Existing BitNet-style flows continue to use ternary quantization metadata.
 - The managed store naming does not change for Bonsai bundles: the output still lands under `Local/...-TRNQ`.

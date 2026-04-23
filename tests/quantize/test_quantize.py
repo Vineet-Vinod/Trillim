@@ -362,6 +362,13 @@ def _write_qwen3_dense_source_model(
     return model_dir
 
 
+def _write_source_metadata(model_dir: Path, *, architecture: str) -> None:
+    (model_dir / "trillim_source.json").write_text(
+        json.dumps({"architecture": architecture}),
+        encoding="utf-8",
+    )
+
+
 def _write_adapter(
     root: Path,
     *,
@@ -544,7 +551,7 @@ class QuantizeTests(unittest.TestCase):
         self.assertEqual(repack_entry["action"], manifest.ACTION_REPACK_TERNARY)
         self.assertEqual((padded_entry["padded_row"], padded_entry["padded_col"]), (384, 256))
 
-    def test_bonsai_readme_discriminator_controls_manifest_and_bundle_metadata(self):
+    def test_bonsai_source_marker_controls_manifest_and_bundle_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             binary_model_dir = _write_bonsai_source_model(
@@ -557,6 +564,8 @@ class QuantizeTests(unittest.TestCase):
                 name="bonsai-ternary",
                 readme_text="Ternary Bonsai release model.",
             )
+            _write_source_metadata(binary_model_dir, architecture="bonsai")
+            _write_source_metadata(ternary_model_dir, architecture="bonsai_ternary")
             binary_config = entrypoint.load_model_config(binary_model_dir)
             ternary_config = entrypoint.load_model_config(ternary_model_dir)
 
@@ -1542,7 +1551,7 @@ class QuantizeInternalTests(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "config.json"):
                 entrypoint.load_model_config(root / "missing-config")
 
-    def test_bonsai_readme_detection_warns_when_readme_is_missing(self):
+    def test_dense_qwen3_defaults_without_source_marker_or_readme(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             model_dir = _write_qwen3_dense_source_model(
@@ -1551,17 +1560,51 @@ class QuantizeInternalTests(unittest.TestCase):
                 include_readme=False,
             )
 
+            config = entrypoint.load_model_config(model_dir)
+            self.assertEqual(config.arch_type, quantize_config.ArchitectureType.QWEN3)
+
+    def test_source_marker_overrides_legacy_readme_detection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = _write_bonsai_source_model(
+                root,
+                name="qwen3-explicit-source",
+                readme_text="Ternary Bonsai release model.",
+            )
+            _write_source_metadata(model_dir, architecture="qwen3")
+
+            config = entrypoint.load_model_config(model_dir)
+
+            self.assertEqual(config.arch_type, quantize_config.ArchitectureType.QWEN3)
+
+    def test_legacy_readme_detection_warns_when_source_marker_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = _write_bonsai_source_model(
+                root,
+                name="bonsai-legacy-readme",
+                readme_text="Ternary Bonsai release model.",
+            )
+
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 config = entrypoint.load_model_config(model_dir)
 
-            self.assertEqual(config.arch_type, quantize_config.ArchitectureType.QWEN3)
+            self.assertEqual(config.arch_type, quantize_config.ArchitectureType.BONSAI_TERNARY)
             self.assertEqual(len(caught), 1)
-            self.assertIn("defaulting Qwen3ForCausalLM detection to dense Qwen3", str(caught[0].message))
+            self.assertIn("README-based Bonsai detection is deprecated", str(caught[0].message))
 
-            (model_dir / "README.md").write_text("Ternary Bonsai release model.", encoding="utf-8")
             with patch.object(Path, "read_text", side_effect=OSError):
                 self.assertFalse(quantize_config._readme_indicates_bonsai_ternary(model_dir))
+
+    def test_source_marker_rejects_invalid_architecture(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_dir = _write_qwen3_dense_source_model(root, include_readme=False)
+            _write_source_metadata(model_dir, architecture="unknown")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported source architecture marker"):
+                entrypoint.load_model_config(model_dir)
 
     def test_manifest_discovery_and_tensor_sorting_helpers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
