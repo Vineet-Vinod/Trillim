@@ -18,7 +18,6 @@ from tests.components.llm.support import (
     make_runtime_model,
     patched_model_store,
 )
-from tests.components.stt.support import make_faster_whisper_stub
 
 
 class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
@@ -40,10 +39,9 @@ class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(component.router(), APIRouter)
         await llm.start()
         await llm.stop()
-        with patch.dict("sys.modules", {"faster_whisper": make_faster_whisper_stub()}):
-            stt = STT()
-            await stt.start()
-            await stt.stop()
+        stt = STT()
+        await stt.start()
+        await stt.stop()
         await TTS().start()
         await TTS().stop()
 

@@ -141,19 +141,20 @@ def _install_e2e_patches() -> None:
         patched_llm_init._trillim_e2e_patched = True  # type: ignore[attr-defined]
         LLM.__init__ = patched_llm_init
 
-    original_stt_import = stt_public.importlib.import_module
+    async def fake_stt_engine_start(self):
+        return None
 
-    def patched_stt_import(module_name: str):
-        if module_name == "faster_whisper":
-            return object()
-        return original_stt_import(module_name)
+    async def fake_stt_engine_stop(self):
+        return None
 
-    async def fake_transcribe_owned_audio_file(audio_path, *, language):
-        text = Path(audio_path).read_bytes().decode("latin-1")
+    async def fake_stt_engine_transcribe(self, pcm, *, conditioning_text="", language=None):
+        del conditioning_text
+        text = bytes(pcm).decode("latin-1")
         return text if language is None else f"{language}:{text}"
 
-    stt_public.importlib.import_module = patched_stt_import
-    stt_public.transcribe_owned_audio_file = fake_transcribe_owned_audio_file
+    stt_public.STTEngine.start = fake_stt_engine_start
+    stt_public.STTEngine.stop = fake_stt_engine_stop
+    stt_public.STTEngine.transcribe = fake_stt_engine_transcribe
 
     if not getattr(TTS.__init__, "_trillim_e2e_patched", False):
         original_tts_init = TTS.__init__

@@ -333,11 +333,11 @@ class VoiceServeE2ETests(unittest.TestCase):
             status, body, _headers = server.request(
                 "/v1/audio/transcriptions?language=en",
                 method="POST",
-                body=b"abc",
-                headers={"content-type": "audio/wav"},
+                body=b"abcd",
+                headers={"content-type": "application/octet-stream"},
             )
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(body), {"text": "en:abc"})
+            self.assertEqual(json.loads(body), {"text": "en:abcd"})
 
             status, body, _headers = server.request(
                 "/v1/voices",

@@ -1,309 +1,206 @@
-"""Tests for the public STT component API."""
-
 from __future__ import annotations
 
 import asyncio
-import tempfile
-import threading
-import time
+import io
 import unittest
+import wave
 from pathlib import Path
-from unittest.mock import patch
 
-from trillim.components.stt._config import OwnedAudioInput
-from trillim.components.stt._config import SourceFileSnapshot
-from trillim.components.stt.public import STT, _bounded_request_stream
-from trillim.errors import AdmissionRejectedError, InvalidRequestError, ProgressTimeoutError
-from tests.components.stt.support import FakeRequest, list_spool_files, make_faster_whisper_stub
+import numpy as np
+
+from trillim.components.stt import STT
+from trillim.components.stt._engine import STTEngine
+from trillim.components.stt._session import AudioSession
+from trillim.errors import ComponentLifecycleError, InvalidRequestError, SessionBusyError
+from trillim.runtime import Runtime
+
+EXPECTED_TEXT = (
+    "on Danny Koviyat was known as the torpedo, which I actually think is unfair, "
+    "because like I said, this incident wasn't really his fault. He did torpedo "
+    "veil out of the race at the Russian Grand Prix, and that was a proper torpedo. "
+    "And he did a similar thing to Fernando Alonso at the Austrian Grand Prix. He "
+    "just drove straight to the back of him, which pushed Fernando into Max "
+    "Verstappen and took both of them out of the race. And then at the British "
+    "Grand Prix, he tried to go side by side with his teammate, Carlos through "
+    "maggots and beckons before torpedoing him out with rest. Okay, maybe calling "
+    "him the torpedo"
+)
 
 
 class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self._temp_dir = tempfile.TemporaryDirectory()
-        self.spool_dir = Path(self._temp_dir.name) / "spool"
-
-    async def asyncTearDown(self) -> None:
-        self._temp_dir.cleanup()
+        self.fixture_path = Path(__file__).with_name("test.wav")
+        self.fixture_bytes = self.fixture_path.read_bytes()
 
     async def _start_stt(self) -> STT:
         stt = STT()
-        stt._spool_dir = self.spool_dir
-        with patch.dict("sys.modules", {"faster_whisper": make_faster_whisper_stub()}):
-            await stt.start()
+        await stt.start()
         return stt
 
-    async def test_start_fails_when_faster_whisper_is_missing(self):
+    def _make_8bit_wav(self) -> bytes:
+        with wave.open(str(self.fixture_path), "rb") as wav_file:
+            frames = wav_file.readframes(wav_file.getnframes())
+            channels = wav_file.getnchannels()
+            rate = wav_file.getframerate()
+        samples = np.frombuffer(frames, dtype="<i2")
+        unsigned = np.clip(
+            ((samples.astype(np.int32) + 32768) >> 8),
+            0,
+            255,
+        ).astype(np.uint8)
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(1)
+            wav_file.setframerate(rate)
+            wav_file.writeframes(unsigned.tobytes())
+        return buffer.getvalue()
+
+    def _make_empty_wav(self) -> bytes:
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(b"")
+        return buffer.getvalue()
+
+    def _make_24bit_wav(self) -> bytes:
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(3)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(b"\x00\x00\x00" * 16)
+        return buffer.getvalue()
+
+    async def test_open_session_requires_started_component(self):
         stt = STT()
-        with patch(
-            "trillim.components.stt.public.importlib.import_module",
-            side_effect=ModuleNotFoundError("faster_whisper"),
-        ):
-            with self.assertRaises(ModuleNotFoundError):
-                await stt.start()
-        self.assertFalse(stt._started)
+        with self.assertRaisesRegex(ComponentLifecycleError, "STT is not running"):
+            stt.open_session()
 
-    async def test_start_is_idempotent_and_track_active_task_keeps_new_owner(self):
+    async def test_transcribe_bytes_and_file_return_expected_text(self):
         stt = await self._start_stt()
-        await stt.start()
+        try:
+            self.assertEqual(await stt.transcribe_bytes(self.fixture_bytes), EXPECTED_TEXT)
+            self.assertEqual(await stt.transcribe_file(str(self.fixture_path)), EXPECTED_TEXT)
+        finally:
+            await stt.stop()
 
-        replacement = asyncio.create_task(asyncio.sleep(0))
-        async with stt._track_active_task():
-            stt._active_task = replacement
+    async def test_audio_session_context_manager_and_state_transitions(self):
+        stt = await self._start_stt()
+        try:
+            async with stt.open_session() as session:
+                self.assertEqual(session.state, "idle")
+                self.assertEqual(await session.transcribe(self.fixture_bytes), EXPECTED_TEXT)
+                self.assertEqual(session.state, "done")
+        finally:
+            await stt.stop()
 
-        self.assertIs(stt._active_task, replacement)
-        await replacement
+    async def test_audio_session_rejects_concurrent_transcribe_calls(self):
+        stt = await self._start_stt()
+        try:
+            session = stt.open_session()
+            task = asyncio.create_task(session.transcribe(self.fixture_bytes))
+            while session.state != "transcribing":
+                await asyncio.sleep(0)
+            with self.assertRaisesRegex(SessionBusyError, "already transcribing"):
+                await session.transcribe(self.fixture_bytes)
+            self.assertEqual(await task, EXPECTED_TEXT)
+            self.assertEqual(session.state, "done")
+        finally:
+            await stt.stop()
+
+    async def test_sdk_concurrent_transcriptions_each_return_expected_text(self):
+        stt = await self._start_stt()
+        try:
+            results = await asyncio.gather(
+                stt.transcribe_bytes(self.fixture_bytes),
+                stt.transcribe_file(self.fixture_path),
+            )
+            self.assertCountEqual(results, [EXPECTED_TEXT, EXPECTED_TEXT])
+        finally:
+            await stt.stop()
+
+    async def test_session_created_before_stop_returns_empty_text_after_stop(self):
+        stt = await self._start_stt()
+        session = stt.open_session()
         await stt.stop()
+        self.assertEqual(await session.transcribe(self.fixture_bytes), "")
+        self.assertEqual(session.state, "done")
 
-    async def test_transcribe_bytes_returns_text_and_cleans_up_owned_temp_file(self):
+    async def test_truncated_wav_is_rejected(self):
         stt = await self._start_stt()
-        seen_path: dict[str, Path] = {}
-
-        async def fake_worker(audio_path: Path, *, language: str | None) -> str:
-            path = Path(audio_path)
-            seen_path["path"] = path
-            self.assertTrue(path.exists())
-            self.assertEqual(path.parent, self.spool_dir)
-            self.assertEqual(language, "en")
-            return "hello"
-
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            side_effect=fake_worker,
-        ):
-            text = await stt.transcribe_bytes(b"abc", language="en")
-
-        self.assertEqual(text, "hello")
-        self.assertFalse(seen_path["path"].exists())
-
-    async def test_transcribe_file_copies_into_owned_temp_and_cleans_up(self):
-        stt = await self._start_stt()
-        source = Path(self._temp_dir.name) / "source.wav"
-        source.write_bytes(b"abc")
-        seen_path: dict[str, Path] = {}
-
-        async def fake_worker(audio_path: Path, *, language: str | None) -> str:
-            path = Path(audio_path)
-            seen_path["path"] = path
-            self.assertNotEqual(path, source)
-            self.assertEqual(path.read_bytes(), b"abc")
-            return "hello"
-
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            side_effect=fake_worker,
-        ):
-            text = await stt.transcribe_file(source, language=None)
-
-        self.assertEqual(text, "hello")
-        self.assertFalse(seen_path["path"].exists())
-
-    async def test_transcribe_file_rejects_empty_path_objects(self):
-        stt = await self._start_stt()
-        with self.assertRaisesRegex(InvalidRequestError, "path is required"):
-            await stt.transcribe_file(Path(""))
-
-    async def test_transcribe_file_rejects_changed_source_and_cleans_up(self):
-        stt = await self._start_stt()
-        source = Path(self._temp_dir.name) / "source.wav"
-        source.write_bytes(b"abc")
-        with patch(
-            "trillim.components.stt._spool.snapshot_source_file",
-            side_effect=[
-                SourceFileSnapshot(size_bytes=3, modified_ns=1),
-                SourceFileSnapshot(size_bytes=3, modified_ns=2),
-            ],
-        ):
-            with self.assertRaisesRegex(InvalidRequestError, "changed while it was being copied"):
-                await stt.transcribe_file(source)
-        self.assertEqual(list_spool_files(self.spool_dir), [])
-
-    async def test_busy_byte_request_fails_before_spooling(self):
-        stt = await self._start_stt()
-        lease = await stt._admission.acquire()
-
-        async def fail_if_called(*args, **kwargs):
-            raise AssertionError("spool helper should not be called")
-
-        with patch(
-            "trillim.components.stt.public.spool_audio_bytes",
-            side_effect=fail_if_called,
-        ):
-            with self.assertRaisesRegex(AdmissionRejectedError, "STT is busy"):
-                await stt.transcribe_bytes(b"abc")
-        await lease.release()
-
-    async def test_busy_file_request_fails_before_worker_launch(self):
-        stt = await self._start_stt()
-        source = Path(self._temp_dir.name) / "source.wav"
-        source.write_bytes(b"abc")
-        lease = await stt._admission.acquire()
-
-        async def fail_if_called(*args, **kwargs):
-            raise AssertionError("worker should not be called")
-
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            side_effect=fail_if_called,
-        ):
-            with self.assertRaisesRegex(AdmissionRejectedError, "STT is busy"):
-                await stt.transcribe_file(source)
-        await lease.release()
-
-    async def test_stop_cancels_active_work_and_waits_for_cleanup(self):
-        stt = await self._start_stt()
-        started = asyncio.Event()
-        seen_path: dict[str, Path] = {}
-
-        async def hanging_worker(audio_path: Path, *, language: str | None) -> str:
-            seen_path["path"] = Path(audio_path)
-            started.set()
-            await asyncio.Event().wait()
-            return "never"
-
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            side_effect=hanging_worker,
-        ):
-            task = asyncio.create_task(stt.transcribe_bytes(b"abc"))
-            await started.wait()
+        try:
+            with self.assertRaisesRegex(InvalidRequestError, "invalid WAV audio"):
+                await stt.transcribe_bytes(self.fixture_bytes[:64])
+        finally:
             await stt.stop()
-            self.assertFalse(stt._started)
-            self.assertFalse(seen_path["path"].exists())
-            with self.assertRaises(asyncio.CancelledError):
-                await task
 
-    async def test_stop_cancels_active_file_copy_and_waits_for_cleanup(self):
+    async def test_8bit_wav_is_accepted(self):
         stt = await self._start_stt()
-        source = Path(self._temp_dir.name) / "source.wav"
-        source.write_bytes(b"abcdef")
-        started = threading.Event()
-        original_read = __import__(
-            "trillim.components.stt._spool",
-            fromlist=["_read_source_chunk"],
-        )._read_source_chunk
-
-        def slow_read(source_handle):
-            chunk = original_read(source_handle)
-            if chunk and not started.is_set():
-                started.set()
-                time.sleep(0.05)
-            return chunk
-
-        with patch("trillim.components.stt._spool.SPOOL_CHUNK_SIZE_BYTES", 1), patch(
-            "trillim.components.stt._spool._read_source_chunk",
-            side_effect=slow_read,
-        ):
-            task = asyncio.create_task(stt.transcribe_file(source))
-            await asyncio.to_thread(started.wait)
+        try:
+            text = await stt.transcribe_bytes(self._make_8bit_wav())
+            self.assertIsInstance(text, str)
+            self.assertIn("torpedo", text.lower())
+        finally:
             await stt.stop()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-        self.assertEqual(list_spool_files(self.spool_dir), [])
 
-    async def test_timeout_error_surfaces_to_sdk_callers(self):
+    async def test_transcribe_bytes_rejects_invalid_sdk_inputs(self):
         stt = await self._start_stt()
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            side_effect=ProgressTimeoutError("timed out"),
-        ):
-            with self.assertRaisesRegex(ProgressTimeoutError, "timed out"):
-                await stt.transcribe_bytes(b"abc")
+        try:
+            with self.assertRaisesRegex(InvalidRequestError, "audio must be bytes"):
+                await stt.transcribe_bytes("bad")  # type: ignore[arg-type]
+            with self.assertRaisesRegex(InvalidRequestError, "audio must not be empty"):
+                await stt.transcribe_bytes(b"")
+            with self.assertRaisesRegex(InvalidRequestError, "whole 16-bit samples"):
+                await stt.transcribe_bytes(b"\x00")
+            with self.assertRaisesRegex(InvalidRequestError, "audio must not be empty"):
+                await stt.transcribe_bytes(self._make_empty_wav())
+            with self.assertRaisesRegex(InvalidRequestError, "unsupported WAV sample width"):
+                await stt.transcribe_bytes(self._make_24bit_wav())
+        finally:
+            await stt.stop()
 
-    async def test_http_upload_timeout_surfaces_and_releases_the_admission_slot(self):
+    async def test_transcribe_bytes_accepts_bytearray_and_memoryview(self):
         stt = await self._start_stt()
+        try:
+            self.assertEqual(await stt.transcribe_bytes(bytearray(self.fixture_bytes)), EXPECTED_TEXT)
+            self.assertEqual(
+                await stt.transcribe_bytes(memoryview(self.fixture_bytes)),
+                EXPECTED_TEXT,
+            )
+        finally:
+            await stt.stop()
 
-        class _SlowRequest(FakeRequest):
-            async def stream(self):
-                self.stream_called = True
-                await asyncio.sleep(0.02)
-                yield b"abc"
 
-        request = _SlowRequest(headers={"content-type": "audio/wav"})
-        with patch("trillim.components.stt.public.UPLOAD_PROGRESS_TIMEOUT_SECONDS", 0.01), patch(
-            "trillim.components.stt.public.TOTAL_UPLOAD_TIMEOUT_SECONDS",
-            1.0,
-        ):
-            with self.assertRaisesRegex(ProgressTimeoutError, "audio upload timed out"):
-                await stt._transcribe_http_request(request)
-        self.assertTrue(request.stream_called)
-        self.assertEqual(list_spool_files(self.spool_dir), [])
-        lease = await stt._admission.acquire()
-        await lease.release()
+class RuntimeSTTTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture_path = Path(__file__).with_name("test.wav")
+        self.fixture_bytes = self.fixture_path.read_bytes()
 
-    async def test_bounded_request_stream_enforces_total_upload_timeout(self):
-        class _TricklingRequest(FakeRequest):
-            async def stream(self):
-                self.stream_called = True
-                while True:
-                    await asyncio.sleep(0.004)
-                    yield b"a"
+    def test_runtime_syncify_supports_component_and_session_usage(self):
+        with Runtime(STT()) as runtime:
+            self.assertEqual(runtime.stt.transcribe_file(self.fixture_path), EXPECTED_TEXT)
+            with runtime.stt.open_session() as session:
+                self.assertEqual(session.state, "idle")
+                self.assertEqual(session.transcribe(self.fixture_bytes), EXPECTED_TEXT)
+                self.assertEqual(session.state, "done")
 
-        request = _TricklingRequest(headers={"content-type": "audio/wav"})
-        with patch("trillim.components.stt.public.UPLOAD_PROGRESS_TIMEOUT_SECONDS", 1.0), patch(
-            "trillim.components.stt.public.TOTAL_UPLOAD_TIMEOUT_SECONDS",
-            0.01,
-        ):
-            with self.assertRaisesRegex(ProgressTimeoutError, "audio upload timed out"):
-                [chunk async for chunk in _bounded_request_stream(request)]
-        self.assertTrue(request.stream_called)
 
-    async def test_bounded_request_stream_raises_immediately_when_deadline_is_already_spent(self):
-        request = FakeRequest(headers={"content-type": "audio/wav"})
+class SessionAndEngineContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_session_cannot_be_constructed_directly(self):
+        with self.assertRaises(TypeError):
+            AudioSession()
 
-        class _Loop:
-            def __init__(self) -> None:
-                self._times = iter([0.0, 2.0])
-
-            def time(self) -> float:
-                return next(self._times)
-
-        with patch("trillim.components.stt.public.asyncio.get_running_loop", return_value=_Loop()), patch(
-            "trillim.components.stt.public.UPLOAD_PROGRESS_TIMEOUT_SECONDS",
-            1.0,
-        ), patch(
-            "trillim.components.stt.public.TOTAL_UPLOAD_TIMEOUT_SECONDS",
-            1.0,
-        ):
-            with self.assertRaisesRegex(ProgressTimeoutError, "audio upload timed out"):
-                [chunk async for chunk in _bounded_request_stream(request)]
-
-    async def test_cleanup_failure_does_not_mask_transcription_error(self):
-        stt = await self._start_stt()
-        owned = OwnedAudioInput(path=Path(self._temp_dir.name) / "owned.audio", size_bytes=3)
-        owned.path.write_bytes(b"abc")
-
-        async def normalize_audio():
-            return owned
-
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            side_effect=RuntimeError("worker boom"),
-        ), patch(
-            "trillim.components.stt.public.unlink_if_exists",
-            side_effect=RuntimeError("cleanup boom"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "worker boom"):
-                await stt._run_transcription(normalize_audio, language=None)
-
-    async def test_cleanup_failure_after_successful_transcription_surfaces(self):
-        stt = await self._start_stt()
-        owned = OwnedAudioInput(path=Path(self._temp_dir.name) / "owned.audio", size_bytes=3)
-        owned.path.write_bytes(b"abc")
-
-        async def normalize_audio():
-            return owned
-
-        with patch(
-            "trillim.components.stt.public.transcribe_owned_audio_file",
-            return_value="hello",
-        ), patch(
-            "trillim.components.stt.public.unlink_if_exists",
-            side_effect=RuntimeError("cleanup boom"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "cleanup boom"):
-                await stt._run_transcription(normalize_audio, language=None)
-
-    async def test_transcribe_requires_started_component(self):
-        stt = STT()
-        with self.assertRaisesRegex(RuntimeError, "not started"):
-            await stt.transcribe_bytes(b"abc")
+    async def test_engine_public_lifecycle_contract(self):
+        engine = STTEngine()
+        await engine.stop()
+        with self.assertRaisesRegex(ComponentLifecycleError, "not running"):
+            await engine.transcribe(b"\x00\x00")
+        await engine.start()
+        try:
+            await engine.start()
+        finally:
+            await engine.stop()
+        await engine.stop()
