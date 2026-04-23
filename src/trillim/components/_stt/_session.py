@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import abc
-import audioop
 import io
 import wave
 from enum import Enum
@@ -133,22 +132,51 @@ class _AudioSession(AudioSession):
             raise InvalidRequestError("audio must not be empty")
         if width <= 0 or channels <= 0 or rate <= 0:
             raise InvalidRequestError("invalid WAV audio")
-        if width == 1:
-            pcm = audioop.bias(pcm, 1, -128)
-        if width != _PCM_WIDTH_BYTES:
-            pcm = audioop.lin2lin(pcm, width, _PCM_WIDTH_BYTES)
+        return self._validate_pcm(self._convert_wav_pcm(pcm, width, channels, rate))
+
+    def _convert_wav_pcm(
+        self,
+        pcm: bytes,
+        width: int,
+        channels: int,
+        rate: int,
+    ) -> bytes:
+        import numpy as np
+
+        samples = self._decode_pcm_samples(pcm, width)
         if channels != _PCM_CHANNELS:
-            pcm = audioop.tomono(pcm, _PCM_WIDTH_BYTES, 0.5, 0.5)
+            frame_count = len(samples) // channels
+            if frame_count * channels != len(samples):
+                raise InvalidRequestError("invalid WAV audio")
+            samples = samples.reshape(frame_count, channels).mean(axis=1)
         if rate != _PCM_SAMPLE_RATE:
-            pcm, _state = audioop.ratecv(
-                pcm,
-                _PCM_WIDTH_BYTES,
-                _PCM_CHANNELS,
-                rate,
-                _PCM_SAMPLE_RATE,
-                None,
+            target_count = max(1, round(len(samples) * _PCM_SAMPLE_RATE / rate))
+            source_positions = np.arange(len(samples), dtype=np.float32)
+            target_positions = np.linspace(
+                0.0,
+                len(samples) - 1,
+                num=target_count,
+                dtype=np.float32,
             )
-        return self._validate_pcm(pcm)
+            samples = np.interp(target_positions, source_positions, samples)
+        return self._encode_pcm_samples(samples)
+
+    def _decode_pcm_samples(self, pcm: bytes, width: int):
+        import numpy as np
+
+        if width == 1:
+            return (np.frombuffer(pcm, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        if width == 2:
+            return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+        if width == 4:
+            return np.frombuffer(pcm, dtype="<i4").astype(np.float32) / 2147483648.0
+        raise InvalidRequestError("unsupported WAV sample width")
+
+    def _encode_pcm_samples(self, samples) -> bytes:
+        import numpy as np
+
+        clipped = np.clip(samples, -1.0, 1.0)
+        return (clipped * 32767.0).astype("<i2").tobytes()
 
     def _is_wav(self, audio: bytes) -> bool:
         return len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WAVE"
