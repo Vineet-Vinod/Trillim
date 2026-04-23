@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from trillim.components._stt._validation import PayloadTooLargeError
+from trillim.components.stt._validation import PayloadTooLargeError
 from trillim.errors import AdmissionRejectedError, InvalidRequestError, ProgressTimeoutError
 
 

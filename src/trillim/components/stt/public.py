@@ -5,16 +5,16 @@ from asyncio import AbstractEventLoop
 from pathlib import Path
 
 from trillim.components import Component
-from trillim.components._stt._admission import TranscriptionAdmission
-from trillim.components._stt._engine import STTEngine
-from trillim.components._stt._limits import (
+from trillim.components.stt._admission import TranscriptionAdmission
+from trillim.components.stt._engine import STTEngine
+from trillim.components.stt._limits import (
     MAX_UPLOAD_BYTES,
     TOTAL_UPLOAD_TIMEOUT_SECONDS,
     UPLOAD_PROGRESS_TIMEOUT_SECONDS,
 )
-from trillim.components._stt._router import build_router
-from trillim.components._stt._session import AudioSession, _create_audio_session
-from trillim.components._stt._validation import PayloadTooLargeError, validate_http_request
+from trillim.components.stt._router import build_router
+from trillim.components.stt._session import AudioSession, _create_audio_session
+from trillim.components.stt._validation import PayloadTooLargeError, validate_http_request
 from trillim.errors import ComponentLifecycleError, InvalidRequestError, ProgressTimeoutError
 
 

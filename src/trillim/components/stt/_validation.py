@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from trillim.components._stt._limits import MAX_LANGUAGE_CHARS, MAX_UPLOAD_BYTES
+from trillim.components.stt._limits import MAX_LANGUAGE_CHARS, MAX_UPLOAD_BYTES
 from trillim.errors import InvalidRequestError
 
 _LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z]{2,8})*$")

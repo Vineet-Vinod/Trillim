@@ -6,11 +6,11 @@ import wave
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from trillim.components._stt._limits import MAX_UPLOAD_BYTES
+from trillim.components.stt._limits import MAX_UPLOAD_BYTES
 from trillim.errors import InvalidRequestError, SessionBusyError
 
 if TYPE_CHECKING:
-    from trillim.components._stt.public import STT
+    from trillim.components.stt.public import STT
 
 _AUDIO_SESSION_OWNER_TOKEN = object()
 _AUDIO_SESSION_CONSTRUCTION_ERROR = (

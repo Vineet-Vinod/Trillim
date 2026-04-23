@@ -8,8 +8,8 @@ import json
 import sys
 from pathlib import Path
 
-from trillim.components._stt._config import DEFAULT_WORKER_CONFIG
-from trillim.components._stt._limits import (
+from trillim.components.stt._config import DEFAULT_WORKER_CONFIG
+from trillim.components.stt._limits import (
     MAX_WORKER_OUTPUT_BYTES,
     TOTAL_TRANSCRIPTION_TIMEOUT_SECONDS,
     WORKER_KILL_AFTER_SECONDS,
