@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import abc
-from asyncio import Lock, Event, AbstractEventLoop
+from enum import Enum
 
 from trillim.components._stt.public import STT
 
@@ -12,10 +12,14 @@ _AUDIO_SESSION_CONSTRUCTION_ERROR = (
 _ALLOW_AUDIO_SESSION_SUBCLASS = False
 
 
-class _AudioSessionFSM()
+class _AudioSessionFSM(Enum):
+    IDLE = "idle"
+    TRANSCRIBING = "transcribing"
+    DONE = "done"
+
 
 def _create_audio_session(stt: STT) -> _AudioSession:
-    return _AudioSession(stt, owner_token=_AUDIO_SESSION_OWNER_TOKEN)
+    return _AudioSession(stt, _owner_token=_AUDIO_SESSION_OWNER_TOKEN)
 
 
 class AudioSession(abc.ABC):
@@ -43,7 +47,7 @@ class _AudioSession(AudioSession):
     """Private concrete audio-session implementation owned by one STT runtime."""
 
     def __new__(cls, stt: STT, *, _owner_token=None):
-        del stt, lock, event
+        del stt
         if _owner_token is not _AUDIO_SESSION_OWNER_TOKEN:
             raise TypeError(_AUDIO_SESSION_CONSTRUCTION_ERROR)
         return super().__new__(cls)
@@ -53,6 +57,7 @@ class _AudioSession(AudioSession):
             raise TypeError(_AUDIO_SESSION_CONSTRUCTION_ERROR)
 
         self._stt = stt
+        self._state = _AudioSessionFSM.IDLE
 
 
 _ALLOW_AUDIO_SESSION_SUBCLASS = False
