@@ -4,12 +4,13 @@ import asyncio
 from asyncio import AbstractEventLoop
 from pathlib import Path
 
+from trillim.components import Component
 from trillim.components._stt._engine import STTEngine
 from trillim.components._stt._session import AudioSession, _create_audio_session
 from trillim.errors import ComponentLifecycleError, InvalidRequestError
 
 
-class STT:
+class STT(Component):
     def __init__(self) -> None:
         self._engine = STTEngine()
         self._transcribe_lock = asyncio.Lock()
