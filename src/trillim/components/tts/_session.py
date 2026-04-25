@@ -7,7 +7,7 @@ import asyncio
 import math
 import random
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from enum import Enum
 from pathlib import Path
 
@@ -42,27 +42,16 @@ class _TTSSessionFSM(Enum):
     DONE = "done"
 
 
-SynthesizeSegment = Callable[[str, object, float], Awaitable[bytes]]
-ResolveVoice = Callable[[str], Awaitable[tuple[object, Path | None]]]
-TokenizerLoader = Callable[[], Awaitable[object]]
-
-
 def _create_tts_session(
     tts,
     *,
     voice: str,
     speed: float,
-    resolve_voice: ResolveVoice,
-    tokenizer_loader: TokenizerLoader,
-    synthesize_segment: SynthesizeSegment,
 ) -> _TTSSession:
     return _TTSSession(
         tts,
         voice=voice,
         speed=speed,
-        resolve_voice=resolve_voice,
-        tokenizer_loader=tokenizer_loader,
-        synthesize_segment=synthesize_segment,
         _owner_token=_TTS_SESSION_OWNER_TOKEN,
     )
 
@@ -148,12 +137,9 @@ class _TTSSession(TTSSession):
         *,
         voice=None,
         speed=None,
-        resolve_voice=None,
-        tokenizer_loader=None,
-        synthesize_segment=None,
         _owner_token=None,
     ):
-        del tts, voice, speed, resolve_voice, tokenizer_loader, synthesize_segment
+        del tts, voice, speed
         if _owner_token is not _TTS_SESSION_OWNER_TOKEN:
             raise TypeError(_TTS_SESSION_CONSTRUCTION_ERROR)
         return super().__new__(cls)
@@ -164,28 +150,15 @@ class _TTSSession(TTSSession):
         *,
         voice=None,
         speed=None,
-        resolve_voice=None,
-        tokenizer_loader=None,
-        synthesize_segment=None,
         _owner_token=None,
     ) -> None:
         if _owner_token is not _TTS_SESSION_OWNER_TOKEN:
             raise TypeError(_TTS_SESSION_CONSTRUCTION_ERROR)
-        if (
-            tts is None
-            or voice is None
-            or speed is None
-            or resolve_voice is None
-            or tokenizer_loader is None
-            or synthesize_segment is None
-        ):
+        if tts is None or voice is None or speed is None:
             raise TypeError(_TTS_SESSION_CONSTRUCTION_ERROR)
         self._tts = tts
         self._voice = voice
         self._speed = speed
-        self._resolve_voice = resolve_voice
-        self._tokenizer_loader = tokenizer_loader
-        self._synthesize_segment = synthesize_segment
         self._state = _TTSSessionFSM.IDLE
         self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(
             maxsize=MAX_EMITTED_AUDIO_CHUNKS
@@ -247,6 +220,8 @@ class _TTSSession(TTSSession):
         return self._synthesize(validate_text(text))
 
     async def _synthesize(self, text: str) -> AsyncIterator[bytes]:
+        if self._stopped():
+            return
         if self._stream_active or not self._done_event.is_set():
             raise SessionBusyError("TTSSession is already synthesizing")
         self._stream_active = True
@@ -257,13 +232,16 @@ class _TTSSession(TTSSession):
         self._state = _TTSSessionFSM.RUNNING
         voice = self._voice
         speed = self._speed
-        voice_state, cleanup_path = await self._resolve_voice(voice)
+        voice_state, cleanup_path = await self._tts._resolve_voice_state(voice)
         self._cleanup_path = cleanup_path
         self._task = asyncio.create_task(
             self._produce(text, voice_state=voice_state, speed=speed)
         )
         try:
             while True:
+                if self._stopped():
+                    await self.close()
+                    break
                 if self._state is _TTSSessionFSM.PAUSED:
                     await self._resume_event.wait()
                     continue
@@ -282,10 +260,14 @@ class _TTSSession(TTSSession):
 
     async def _produce(self, text: str, *, voice_state: object, speed: float) -> None:
         try:
-            tokenizer = await self._tokenizer_loader()
+            tokenizer = await self._tts._get_tokenizer()
             segments = tuple(iter_text_segments(text, tokenizer))
             for index, segment in enumerate(segments):
-                pcm = await self._synthesize_segment(segment, voice_state, speed)
+                if self._stopped():
+                    break
+                pcm = await self._tts._synthesize_segment(segment, voice_state, speed)
+                if self._stopped():
+                    break
                 await self._audio_queue.put(
                     _postprocess_segment_pcm(
                         pcm,
@@ -340,6 +322,10 @@ class _TTSSession(TTSSession):
     def _raise_if_busy(self, field_name: str) -> None:
         if not self._done_event.is_set() or self._stream_active:
             raise SessionBusyError(f"cannot change {field_name} while synthesizing")
+
+    def _stopped(self) -> bool:
+        stop_event = getattr(self._tts, "_stop_event", None)
+        return bool(stop_event is not None and stop_event.is_set())
 
     def __del__(self):
         task = self._task

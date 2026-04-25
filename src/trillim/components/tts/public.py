@@ -63,6 +63,8 @@ class TTS(Component):
         self._built_in_voice_names: tuple[str, ...] = ()
         self._voice_state_cache: dict[str, str | bytes] = {}
         self._spool_dir = Path(tempfile.gettempdir()) / "trillim-tts"
+        self._stop_event = asyncio.Event()
+        self._stop_event.set()
         self._started = False
 
     def router(self) -> APIRouter:
@@ -89,6 +91,7 @@ class TTS(Component):
             self._voice_state_cache = {
                 name: name for name in built_in_voice_names
             }
+            self._stop_event.clear()
             self._started = True
 
     async def stop(self) -> None:
@@ -98,6 +101,7 @@ class TTS(Component):
             if not self._started:
                 return
             self._started = False
+            self._stop_event.set()
             self._voice_state_cache.clear()
             async with self._tokenizer_lock:
                 self._tokenizer = None
@@ -160,9 +164,6 @@ class TTS(Component):
             self,
             voice=resolved_voice,
             speed=DEFAULT_SPEED if speed is None else validate_speed(speed),
-            resolve_voice=self._resolve_voice_state,
-            tokenizer_loader=self._get_tokenizer,
-            synthesize_segment=self._synthesize_segment,
         )
 
     async def _normalize_voice_name(self, voice: str) -> str:
@@ -233,7 +234,7 @@ class TTS(Component):
             raise
 
     def _require_started(self) -> None:
-        if not self._started:
+        if self._stopped():
             raise ComponentLifecycleError("TTS is not running")
 
     def _require_voice_store(self) -> VoiceStore:
@@ -250,6 +251,9 @@ class TTS(Component):
             raise ComponentLifecycleError(
                 "TTS is bound to one event loop; create a new TTS per thread/event loop"
             )
+
+    def _stopped(self) -> bool:
+        return not self._started or self._stop_event.is_set()
 
 
 def _load_built_in_voice_names() -> tuple[str, ...]:
