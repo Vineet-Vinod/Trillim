@@ -136,7 +136,7 @@ class TTS(Component):
                 VOICE_STORE_ROOT,
                 name=normalized_name,
                 voice_state=voice_state,
-                existing_names=set(self._voice_state_cache),
+                existing_names=set(self._voice_state_cache) - set(self._built_in_voice_names),
             )
             self._voice_state_cache[registered_name] = voice_state
             return registered_name
