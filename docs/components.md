@@ -264,6 +264,7 @@ Practical notes:
 ## Use `TTS`
 
 `TTS` also requires the `voice` extra.
+`TTS()` does not take constructor options; choose `voice` and `speed` when opening a session.
 
 ```python
 import asyncio
@@ -273,17 +274,17 @@ from trillim import TTS
 
 
 async def main():
-    tts = TTS(default_voice="alba", speed=1.0)
+    tts = TTS()
     await tts.start()
     try:
         print(await tts.list_voices())
 
-        wav_bytes = await tts.synthesize_wav("Hello from Trillim.")
-        Path("speech.wav").write_bytes(wav_bytes)
+        async with await tts.open_session(voice="alba", speed=1.0) as session:
+            pcm = await session.collect("Hello from Trillim.")
+            Path("speech.pcm").write_bytes(pcm)
 
-        async with await tts.speak("Streaming speech") as session:
-            pcm = await session.collect()
-            print(len(pcm))
+            async for chunk in session.synthesize("Streaming speech."):
+                print(len(chunk))
     finally:
         await tts.stop()
 
@@ -296,9 +297,7 @@ Public helpers:
 - `await tts.list_voices()`
 - `await tts.register_voice(name, audio)`
 - `await tts.delete_voice(name)`
-- `await tts.synthesize_stream(text, voice=None, speed=None)`
-- `await tts.synthesize_wav(text, voice=None, speed=None)`
-- `await tts.speak(text, voice=None, speed=None)`
+- `await tts.open_session(voice=None, speed=None)`
 
 `audio` for `register_voice()` can be:
 
@@ -307,14 +306,22 @@ Public helpers:
 - `Path`
 
 Custom voice names and `voice` selectors accept only ASCII letters and digits.
+Custom voices are stored as Pocket TTS-native `.safetensors` under `~/.trillim/voices`.
+Legacy `.state` files and invalid safetensors files are skipped at startup with warnings and do not appear in `list_voices()`.
 
 Session rules that matter:
 
-- `TTSSession` is created by `TTS.speak()`. You do not construct it directly.
-- A session is single-consumer.
-- `await session.collect()` and `async for chunk in session` are mutually exclusive.
-- Only one live TTS session is allowed at a time. A second request raises `AdmissionRejectedError`.
-- You can `pause()`, `resume()`, `cancel()`, and `set_speed()` on a live session.
+- `TTSSession` is created by `TTS.open_session()`. You do not construct it directly.
+- A session is reusable. Call `collect(text)` or iterate `synthesize(text)` for each synthesis turn.
+- `collect(text)` returns raw PCM bytes: `24 kHz`, mono, signed `16-bit` little-endian.
+- `synthesize(text)` yields raw PCM chunks with the same format.
+- A session is single-consumer while one synthesis is active; starting a second synthesis on the same session raises `SessionBusyError`.
+- `set_voice()` is allowed only when the session is idle or done.
+- `set_speed()` is allowed during synthesis and is a best-effort live update for later segments.
+- `pause()` stops yielding queued chunks to the caller until `resume()`.
+- `close()` cancels any active synthesis, clears buffered audio, and leaves the session reusable.
+- Direct async `TTS` use is bound to one event loop. Create a new `TTS()` per thread or event loop.
+- The SDK serializes engine access internally. The HTTP router still enforces one live speech request at a time and rejects concurrent requests with `429`.
 
 ## Public Error Types You Will See First
 

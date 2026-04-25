@@ -36,7 +36,7 @@ Important rules:
 - sessions are created by their owning service and are never caller-constructed
 - the public session types are abstract handles; concrete implementations stay private
 - sessions are single-consumer
-- explicit close and cancel behavior is part of the contract
+- explicit close behavior is part of the contract
 - `Runtime` is the supported sync context-manager surface for returned session handles
 
 ### `ChatSession` States
@@ -57,19 +57,20 @@ Important implications:
 
 ### `TTSSession` States
 
+- `idle`
 - `running`
 - `paused`
-- `completed`
-- `cancelled`
-- `failed`
-- `owner_stopped`
+- `done`
 
 Important implications:
 
-- `pause()` applies at safe boundaries, not retroactively
-- `set_speed()` affects the next synthesis chunk and later chunks only
-- `collect()` and async iteration are mutually exclusive
-- `close()` and `cancel()` wait for cleanup before returning
+- `collect(text)` and `synthesize(text)` start one synthesis turn on a reusable session
+- only one synthesis turn can be active per session
+- `pause()` is consumer-visible: queued chunks are not yielded until `resume()`
+- the producer may continue synthesizing ahead until the bounded queue fills
+- `set_voice()` is rejected while synthesis is active
+- `set_speed()` is best-effort during active synthesis and affects later post-processing
+- `close()` cancels any active synthesis, clears buffered audio, and leaves the session reusable
 
 ## Safe-Boundary Control Semantics
 
@@ -79,9 +80,9 @@ Safe boundaries:
 
 - `LLM`: emitted token or stream chunk boundaries
 - `STT`: no caller-visible incremental control surface; work starts only after the full bounded upload is accepted
-- `TTS`: text-segment and emitted-audio boundaries
+- `TTS`: text-segment, emitted-audio, and bounded-queue boundaries
 
-This matters for cancellation, pause, resume, and speed changes.
+This matters for close/cancellation, pause, resume, and speed changes.
 
 ## Search Harness Contract
 
@@ -176,10 +177,10 @@ The runtime avoids unbounded queues and unbounded retries by design.
 
 - input text cap: `1_000_000` chars
 - raw HTTP speech body cap: `6 MiB`
-- active jobs: `1`
-- queue length: `0`
+- HTTP active jobs: `1`
+- HTTP queue length: `0`
+- SDK engine concurrency: `1`
 - hard text-segment cap: `512` chars
-- pending segment queue: `8`
 - emitted audio chunk queue: `8`
 
 ### Custom Voices
@@ -189,6 +190,8 @@ The runtime avoids unbounded queues and unbounded retries by design.
 - max serialized voice state per voice: `64 MiB`
 - total stored custom voice bytes: `100 MiB`
 - voice-state build timeout: `30s`
+- custom voice files use Pocket TTS-native `.safetensors`
+- legacy `.state` files and invalid voice payloads are skipped with warnings at startup
 
 ## Progress Timeout Model
 
@@ -207,6 +210,12 @@ For STT specifically:
 
 - the HTTP ingress path also enforces `content-type`, `content-length`, upload progress timeout, total upload timeout, and single-request admission before transcription begins
 - the SDK path is intentionally lighter and relies on caller discipline rather than the full HTTP hardening boundary
+
+For TTS specifically:
+
+- the HTTP speech route enforces single-request admission and rejects concurrent speech requests with `429`
+- the SDK path allows multiple sessions, but all engine calls are serialized by the owning `TTS` instance
+- direct async `TTS` use is bound to one event loop; create one component instance per thread or event loop
 
 This is why a timeout in Trillim often implies worker recovery, not just a raised error.
 

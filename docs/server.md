@@ -278,9 +278,10 @@ Important facts:
 - the HTTP response is SSE, not WAV
 - PCM is `24 kHz`, mono, `16-bit`
 - max text body size: `6 MiB`
-- only one live TTS session is allowed at a time
+- only one live HTTP TTS speech request is allowed at a time
 
-If you want a ready-to-write WAV payload in Python, prefer `await tts.synthesize_wav(...)` from the SDK.
+The Python SDK returns raw PCM through `TTSSession.collect(text)` or `TTSSession.synthesize(text)`.
+If you need WAV, wrap the returned PCM in your application.
 
 ### `GET /v1/voices`
 
@@ -312,6 +313,8 @@ Important facts:
 - max serialized custom voice state: `64 MiB`
 - custom voice names and `voice` selectors accept only ASCII letters and digits
 - custom voice storage lives under `~/.trillim/voices`
+- new custom voices are persisted as Pocket TTS-native `.safetensors`
+- legacy `.state` files and invalid safetensors files are skipped at startup with warnings and are not listed
 - voice cloning support requires accepting the `kyutai/pocket-tts` terms and authenticating with Hugging Face
 - if a reference sample exceeds the serialized voice-state cap, Trillim rejects it and you should retry with a shorter sample
 
