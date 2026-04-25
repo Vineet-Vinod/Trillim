@@ -253,6 +253,8 @@ class _TTSSession(TTSSession):
         finally:
             if self._task is None and not self._done_event.is_set():
                 await self._finish(_TTSSessionFSM.IDLE, None, clear_queue=True)
+            elif not self._done_event.is_set():
+                await self._cancel_active()
             self._stream_active = False
 
     async def _produce(self, text: str, *, voice_state: object) -> None:
