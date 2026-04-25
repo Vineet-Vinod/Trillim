@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import struct
 import sys
 from pathlib import Path
 
 from trillim.components.stt._config import DEFAULT_WORKER_CONFIG
 from trillim.components.stt._limits import (
     MAX_WORKER_OUTPUT_BYTES,
+    MAX_UPLOAD_BYTES,
+    PCM_WIDTH_BYTES,
     TOTAL_TRANSCRIPTION_TIMEOUT_SECONDS,
     WORKER_KILL_AFTER_SECONDS,
     STARTUP_TIMEOUT_SECONDS,
@@ -28,6 +31,11 @@ class STTEngineCrashedError(STTEngineError):
 
 class STTEngineCatastrophicError(STTEngineError, ComponentLifecycleError):
     """Raised when the engine cannot be recovered."""
+
+
+_REQUEST_HEADER = struct.Struct(">I")
+_RESPONSE_HEADER = struct.Struct(">cI")
+_MAX_REQUEST_BYTES = ((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 64 * 1024
 
 
 class STTEngine:
@@ -68,19 +76,18 @@ class STTEngine:
             await self._stop_engine()
             raise STTEngineCatastrophicError("STT engine pipes are unavailable")
 
-        request = json.dumps(
-            {
-                "pcm": base64.b64encode(pcm).decode("ascii"),
-                "conditioning_text": conditioning_text,
-                "language": language,
-            }
-        ).encode("utf-8") + b"\n"
+        request = _encode_transcription_request(
+            pcm=pcm,
+            conditioning_text=conditioning_text,
+            language=language,
+        )
 
         try:
+            stdin.write(_REQUEST_HEADER.pack(len(request)))
             stdin.write(request)
             await asyncio.wait_for(stdin.drain(), timeout=WORKER_KILL_AFTER_SECONDS)
-            response_line = await asyncio.wait_for(
-                stdout.readline(),
+            kind, payload = await asyncio.wait_for(
+                _read_response(stdout),
                 timeout=TOTAL_TRANSCRIPTION_TIMEOUT_SECONDS,
             )
         except asyncio.CancelledError:
@@ -97,29 +104,14 @@ class STTEngine:
                 "STT engine crashed during transcription and was recovered"
             ) from exc
 
-        if not response_line:
+        if kind == b"T":
+            return payload.decode("utf-8", errors="replace")
+        if kind == b"E":
             await self.recover()
             raise STTEngineCrashedError(
-                "STT engine exited during transcription and was recovered"
+                payload.decode("utf-8", errors="replace")
+                or "STT engine failed during transcription"
             )
-        if len(response_line) > MAX_WORKER_OUTPUT_BYTES:
-            await self.recover()
-            raise STTEngineCrashedError("STT engine produced oversized stdout and was recovered")
-
-        try:
-            response = json.loads(response_line)
-        except json.JSONDecodeError as exc:
-            await self.recover()
-            raise STTEngineCrashedError(
-                "STT engine returned malformed output and was recovered"
-            ) from exc
-
-        if response.get("status") == "text" and isinstance(response.get("text"), str):
-            return response["text"]
-
-        if response.get("status") == "error" and isinstance(response.get("message"), str):
-            await self.recover()
-            raise STTEngineCrashedError(response["message"])
 
         await self.recover()
         raise STTEngineCrashedError(
@@ -139,20 +131,14 @@ class STTEngine:
             stdout = process.stdout
             if stdout is None:
                 raise STTEngineCatastrophicError("STT engine stdout is unavailable")
-            response_line = await asyncio.wait_for(
-                stdout.readline(),
+            kind, payload = await asyncio.wait_for(
+                _read_response(stdout),
                 timeout=STARTUP_TIMEOUT_SECONDS,
             )
-            if not response_line:
-                raise STTEngineCatastrophicError("STT engine failed to start")
-            if len(response_line) > MAX_WORKER_OUTPUT_BYTES:
-                raise STTEngineCatastrophicError("STT engine produced oversized stdout")
-            response = json.loads(response_line)
-            if response.get("status") != "ready":
-                raise STTEngineCatastrophicError(
-                    str(response.get("message", "STT engine failed to start"))
-                )
-            return process
+            if kind == b"R":
+                return process
+            message = payload.decode("utf-8", errors="replace") or "STT engine failed to start"
+            raise STTEngineCatastrophicError(message)
         except BaseException:
             if process.returncode is None:
                 process.kill()
@@ -171,7 +157,9 @@ class STTEngine:
         stdin = process.stdin
         if stdin is not None:
             try:
-                stdin.write(b'{"command":"stop"}\n')
+                request = json.dumps({"command": "stop"}, separators=(",", ":")).encode("utf-8")
+                stdin.write(_REQUEST_HEADER.pack(len(request)))
+                stdin.write(request)
                 await asyncio.wait_for(stdin.drain(), timeout=WORKER_KILL_AFTER_SECONDS)
             except Exception:
                 pass
@@ -194,7 +182,7 @@ class STTEngine:
             raise InvalidRequestError("PCM audio must be bytes")
         if not pcm:
             raise InvalidRequestError("PCM audio must not be empty")
-        if len(pcm) % 2 != 0:
+        if len(pcm) % PCM_WIDTH_BYTES != 0:
             raise InvalidRequestError("PCM audio must contain whole 16-bit samples")
         return pcm
 
@@ -209,11 +197,41 @@ class STTEngine:
         return language
 
 
-def _worker_main() -> int:
-    def write(payload: dict[str, str]) -> None:
-        sys.stdout.write(json.dumps(payload) + "\n")
-        sys.stdout.flush()
+def _encode_transcription_request(
+    *,
+    pcm: bytes,
+    conditioning_text: str,
+    language: str | None,
+) -> bytes:
+    payload = json.dumps(
+        {
+            "command": "transcribe",
+            "pcm": base64.b64encode(pcm).decode("ascii"),
+            "conditioning_text": conditioning_text,
+            "language": language,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > _MAX_REQUEST_BYTES:
+        raise InvalidRequestError("STT engine request is too large")
+    return payload
 
+
+async def _read_response(stream: asyncio.StreamReader) -> tuple[bytes, bytes]:
+    header = await stream.readexactly(_RESPONSE_HEADER.size)
+    kind, size = _RESPONSE_HEADER.unpack(header)
+    if size > MAX_WORKER_OUTPUT_BYTES:
+        raise STTEngineCrashedError("STT engine produced oversized stdout")
+    return kind, await stream.readexactly(size)
+
+
+def _write_response(kind: bytes, payload: bytes) -> None:
+    sys.stdout.buffer.write(_RESPONSE_HEADER.pack(kind, len(payload)))
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
+
+
+def _worker_main() -> int:
     try:
         import faster_whisper
         import numpy as np
@@ -223,33 +241,43 @@ def _worker_main() -> int:
             device=DEFAULT_WORKER_CONFIG.device,
             compute_type=DEFAULT_WORKER_CONFIG.compute_type,
         )
-        write({"status": "ready"})
+        _write_response(b"R", b"")
     except Exception as exc:
-        write({"status": "startup_error", "message": str(exc) or type(exc).__name__})
+        _write_response(b"E", _error_payload(exc))
         return 1
 
-    for line in sys.stdin.buffer:
+    stdin = sys.stdin.buffer
+    while True:
         try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            write({"status": "error", "message": "Malformed worker request"})
-            continue
+            header = stdin.read(_REQUEST_HEADER.size)
+            if not header:
+                return 0
+            if len(header) != _REQUEST_HEADER.size:
+                raise RuntimeError("STT engine received malformed stdin input")
+            (size,) = _REQUEST_HEADER.unpack(header)
+            if size > _MAX_REQUEST_BYTES:
+                raise RuntimeError("STT engine request is too large")
+            payload = stdin.read(size)
+            if len(payload) != size:
+                raise RuntimeError("STT engine received malformed stdin input")
+            request = json.loads(payload)
 
-        if request.get("command") == "stop":
-            return 0
+            command = request.get("command")
+            if command == "stop":
+                return 0
+            if command != "transcribe":
+                raise RuntimeError("STT engine received unknown command")
 
-        pcm_b64 = request.get("pcm")
-        conditioning_text = request.get("conditioning_text", "")
-        language = request.get("language")
-        if (
-            not isinstance(pcm_b64, str)
-            or not isinstance(conditioning_text, str)
-            or (language is not None and not isinstance(language, str))
-        ):
-            write({"status": "error", "message": "Malformed worker request"})
-            continue
+            pcm_b64 = request.get("pcm")
+            conditioning_text = request.get("conditioning_text", "")
+            language = request.get("language")
+            if (
+                not isinstance(pcm_b64, str)
+                or not isinstance(conditioning_text, str)
+                or (language is not None and not isinstance(language, str))
+            ):
+                raise RuntimeError("STT engine received malformed request")
 
-        try:
             pcm = base64.b64decode(pcm_b64.encode("ascii"), validate=True)
             audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
             segments, _info = model.transcribe(
@@ -262,13 +290,13 @@ def _worker_main() -> int:
                 vad_filter=False,
             )
             text = "".join(segment.text for segment in segments).strip()
+            _write_response(b"T", text.encode("utf-8", errors="replace"))
         except Exception as exc:
-            write({"status": "error", "message": str(exc) or type(exc).__name__})
-            continue
+            _write_response(b"E", _error_payload(exc))
 
-        write({"status": "text", "text": text})
 
-    return 0
+def _error_payload(exc: Exception) -> bytes:
+    return (str(exc) or type(exc).__name__).encode("utf-8", errors="replace")
 
 
 if __name__ == "__main__":
