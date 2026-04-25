@@ -234,9 +234,6 @@ async def main():
     stt = STT()
     await stt.start()
     try:
-        text = await stt.transcribe_file("sample.wav", language="en")
-        print(text)
-
         async with stt.open_session() as session:
             print(await session.transcribe(Path("sample.wav").read_bytes(), language="en"))
     finally:
@@ -249,15 +246,13 @@ asyncio.run(main())
 Public helpers:
 
 - `stt.open_session()`
-- `await stt.transcribe_bytes(audio_bytes, language=None)`
-- `await stt.transcribe_file(path, language=None)`
+- `await session.transcribe(audio_bytes, language=None)`
 
 Practical notes:
 
 - `AudioSession` is created by `STT.open_session()`. You do not construct it directly.
-- `transcribe_bytes()` accepts signed 16-bit little-endian mono `16 kHz` PCM bytes or WAV that Trillim converts to that PCM format.
+- `session.transcribe()` accepts signed 16-bit little-endian mono `16 kHz` PCM bytes or WAV that Trillim converts to that PCM format.
 - `language` is optional and must contain only letters and hyphens.
-- `transcribe_file()` is an SDK convenience that reads the caller-owned file directly and then uses the same byte path.
 - `STT` serializes engine use to one transcription at a time. SDK callers queue cooperatively behind that slot instead of failing fast.
 - Direct async `STT` use is bound to one event loop. Create a new `STT()` per thread or event loop.
 

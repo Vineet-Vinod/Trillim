@@ -208,7 +208,7 @@ Rules:
 
 For STT specifically:
 
-- the HTTP ingress path also enforces `content-type`, `content-length`, upload progress timeout, total upload timeout, and single-request admission before transcription begins
+- the HTTP ingress path enforces `content-type`, `content-length`, upload progress timeout, and total upload timeout before transcription begins
 - the SDK path is intentionally lighter and relies on caller discipline rather than the full HTTP hardening boundary
 
 For TTS specifically:
