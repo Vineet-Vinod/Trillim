@@ -100,6 +100,20 @@ class TTSRouterTests(unittest.TestCase):
             body,
         )
 
+    def test_audio_speech_uses_registered_custom_voice_header(self):
+        with self._make_client() as client:
+            create = client.post("/v1/voices", content=b"voice", headers={"name": "custom"})
+            self.assertEqual(create.status_code, 200)
+            response = client.post(
+                "/v1/audio/speech",
+                content=b"hello",
+                headers={"voice": "custom"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: audio\n", response.text)
+        self.assertIsInstance(FakeTTSEngine.instances[-1].synthesize_calls[-1][1], dict)
+
     def test_audio_speech_maps_invalid_requests(self):
         with self._make_client() as client:
             cases = (

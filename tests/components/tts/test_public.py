@@ -7,9 +7,10 @@ from pathlib import Path
 
 from trillim.components.tts import TTS, TTSSession
 from trillim.components.tts._engine import TTSEngineCrashedError
+from trillim.components.tts._voices import publish_custom_voice
 from trillim.errors import ComponentLifecycleError, InvalidRequestError, SessionBusyError
 
-from tests.components.tts.support import make_started_tts
+from tests.components.tts.support import fake_voice_state, make_started_tts, patched_tts_environment
 
 
 class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +41,25 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         await tts.stop()
         self.assertTrue(engine.started)
         self.assertTrue(engine.stopped)
+
+    async def test_start_loads_valid_custom_voices_from_disk(self):
+        await publish_custom_voice(
+            self.voice_root,
+            name="stored",
+            voice_state=fake_voice_state(),
+            existing_names={"alba", "marius"},
+        )
+
+        stack = patched_tts_environment(self.voice_root)
+        self._stacks.append(stack)
+        tts = TTS()
+        await tts.start()
+        try:
+            self.assertEqual(await tts.list_voices(), ["alba", "marius", "stored"])
+            async with await tts.open_session(voice="stored") as session:
+                self.assertEqual(await session.collect("hello"), b"  hello")
+        finally:
+            await tts.stop()
 
     async def test_session_collect_and_stream_use_engine_state(self):
         tts, engine = await self._start_tts()

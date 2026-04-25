@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import base64
+import json
+import struct
+import unittest
+
+import torch
+
+from trillim.components.tts._engine import (
+    _audio_tensor_to_pcm_bytes,
+    _encode_synthesis_request,
+    _error_payload,
+    is_voice_cloning_auth_error,
+)
+from trillim.components.tts._validation import load_safe_voice_state_safetensors_bytes
+from trillim.errors import InvalidRequestError
+
+from tests.components.tts.support import fake_voice_state
+
+
+class TTSEngineHelperTests(unittest.TestCase):
+    def test_encode_synthesis_request_for_predefined_voice(self):
+        payload = json.loads(
+            _encode_synthesis_request(text="hello", voice_state="alba")
+        )
+
+        self.assertEqual(payload["command"], "synthesize")
+        self.assertEqual(payload["text"], "hello")
+        self.assertEqual(payload["voice_state"], {"kind": "predefined", "name": "alba"})
+
+    def test_encode_synthesis_request_for_custom_voice_state_dict(self):
+        payload = json.loads(
+            _encode_synthesis_request(text="hello", voice_state=fake_voice_state())
+        )
+
+        self.assertEqual(payload["voice_state"]["kind"], "serialized")
+        encoded = payload["voice_state"]["data"].encode("ascii")
+        state = load_safe_voice_state_safetensors_bytes(base64.b64decode(encoded))
+        self.assertEqual(state["module"]["cache"].tolist(), [1.0])
+
+    def test_encode_synthesis_request_accepts_bytes_like_state(self):
+        state_bytes = base64.b64decode(
+            json.loads(
+                _encode_synthesis_request(text="hello", voice_state=fake_voice_state())
+            )["voice_state"]["data"]
+        )
+
+        for voice_state in (state_bytes, bytearray(state_bytes), memoryview(state_bytes)):
+            with self.subTest(type=type(voice_state).__name__):
+                payload = json.loads(
+                    _encode_synthesis_request(text="hello", voice_state=voice_state)
+                )
+                self.assertEqual(payload["voice_state"]["kind"], "serialized")
+
+    def test_encode_synthesis_request_rejects_invalid_inputs(self):
+        with self.assertRaisesRegex(InvalidRequestError, "voice_state"):
+            _encode_synthesis_request(text="hello", voice_state=object())
+
+    def test_audio_tensor_to_pcm_bytes_clamps_to_int16(self):
+        pcm = _audio_tensor_to_pcm_bytes([-2.0, -1.0, 0.0, 0.5, 2.0])
+
+        self.assertEqual(
+            struct.unpack("<5h", pcm),
+            (-32767, -32767, 0, 16384, 32767),
+        )
+
+    def test_audio_tensor_to_pcm_bytes_accepts_tensors(self):
+        pcm = _audio_tensor_to_pcm_bytes(torch.tensor([[0.0, 1.0]]))
+
+        self.assertEqual(struct.unpack("<2h", pcm), (0, 32767))
+
+    def test_error_payload_and_auth_error_detection(self):
+        self.assertEqual(_error_payload(RuntimeError()), b"RuntimeError")
+        self.assertFalse(is_voice_cloning_auth_error("plain failure"))
+        self.assertTrue(
+            is_voice_cloning_auth_error(
+                "ValueError: We could not download the weights for the model with "
+                "voice cloning, but you're trying to use voice cloning. Without voice "
+                "cloning, you can use our catalog of voices ['alba', 'marius', "
+                "'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma']. If "
+                "you want access to the model with voice cloning, go to "
+                "https://huggingface.co/kyutai/pocket-tts and accept the terms, "
+                "then make sure you're logged in locally with `uvx hf auth login`"
+            )
+        )
