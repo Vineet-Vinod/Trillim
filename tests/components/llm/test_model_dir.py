@@ -1213,6 +1213,21 @@ class ModelDirectoryTests(unittest.TestCase):
                 [1, 2],
             )
 
+            (metadata_dir / "generation_config.json").write_text(
+                json.dumps({"eos_token_id": [151645, 151643]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _collect_eos_tokens(
+                    {"eos_token_id": 151645},
+                    ArchitectureType.QWEN3,
+                    metadata_dir,
+                ),
+                [151645, 151643],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metadata_dir = Path(temp_dir)
             with self.assertRaisesRegex(ModelValidationError, "No EOS tokens"):
                 _collect_eos_tokens(
                     {"eos_token_id": []},

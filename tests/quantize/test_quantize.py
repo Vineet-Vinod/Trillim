@@ -637,7 +637,7 @@ class QuantizeTests(unittest.TestCase):
             self.assertEqual(binary_metadata["quantization"], "binary")
             self.assertEqual(ternary_metadata["quantization"], "grouped-ternary")
 
-    def test_dense_qwen3_defaults_to_ternary_manifest_and_qwen3_metadata(self):
+    def test_dense_qwen3_defaults_to_q8_0_manifest_and_qwen3_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             model_dir = _write_qwen3_dense_source_model(root)
@@ -660,7 +660,7 @@ class QuantizeTests(unittest.TestCase):
             norm_entry = next(
                 entry for entry in payload["tensors"] if entry["row"] == 32 and entry["col"] == 1
             )
-            self.assertEqual(quantized_entry["action"], manifest.ACTION_TERNARY_QUANTIZE)
+            self.assertEqual(quantized_entry["action"], manifest.ACTION_Q8_0_QUANTIZE)
             self.assertEqual(norm_entry["action"], manifest.ACTION_BF16_RAW)
 
             output_dir = root / "qwen3-out"
@@ -669,7 +669,7 @@ class QuantizeTests(unittest.TestCase):
             output.write_model_metadata(output_dir, config=config, model_dir=model_dir)
             metadata = json.loads((output_dir / "trillim_config.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["architecture"], "qwen3")
-            self.assertEqual(metadata["quantization"], "ternary")
+            self.assertEqual(metadata["quantization"], "q8_0")
 
     def test_build_manifest_rejects_unsupported_tensor_keys(self):
         with tempfile.TemporaryDirectory() as temp_dir:

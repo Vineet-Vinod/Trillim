@@ -18,6 +18,7 @@ ACTION_TERNARY_QUANTIZE = 1
 ACTION_REPACK_TERNARY = 3
 ACTION_Q1_0_128 = 4
 ACTION_GROUP_TERNARY_QUANTIZE = 5
+ACTION_Q8_0_QUANTIZE = 6
 
 SECTION_TEXT_CORE = 1
 
@@ -66,6 +67,8 @@ def _quantized_tensor_action(dtype_str: str, arch_type: ArchitectureType) -> int
         return ACTION_Q1_0_128
     if arch_type == ArchitectureType.BONSAI_TERNARY:
         return ACTION_GROUP_TERNARY_QUANTIZE
+    if arch_type == ArchitectureType.QWEN3:
+        return ACTION_Q8_0_QUANTIZE
     if dtype_str in {"I8", "U8"}:
         return ACTION_REPACK_TERNARY
     return ACTION_TERNARY_QUANTIZE

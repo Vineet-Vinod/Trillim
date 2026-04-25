@@ -482,6 +482,13 @@ def _collect_eos_tokens(
         eos_tokens = [int(token_id) for token_id in eos_raw]
     else:
         eos_tokens = [int(eos_raw)]
+    generation_config = _load_optional_json(metadata_dir / "generation_config.json")
+    if isinstance(generation_config, dict) and "eos_token_id" in generation_config:
+        generation_eos_raw = generation_config["eos_token_id"]
+        if isinstance(generation_eos_raw, list):
+            eos_tokens.extend(int(token_id) for token_id in generation_eos_raw)
+        else:
+            eos_tokens.append(int(generation_eos_raw))
     tokenizer_payload = _load_optional_json(metadata_dir / "tokenizer.json")
     added_tokens_payload = _load_optional_json(metadata_dir / "added_tokens.json")
     eos_tokens.extend(_collect_added_tokens(tokenizer_payload))
