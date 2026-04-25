@@ -17,7 +17,8 @@ from trillim.components.tts._limits import (
     WORKER_KILL_AFTER_SECONDS,
 )
 from trillim.components.tts._validation import (
-    load_safe_voice_state_bytes,
+    dump_voice_state_safetensors_bytes,
+    load_safe_voice_state_safetensors_bytes,
     validate_speed,
     validate_text,
     validate_voice_state_bytes,
@@ -69,7 +70,7 @@ class TTSEngine:
         self,
         text: str,
         *,
-        voice_state: str | bytes | bytearray | memoryview,
+        voice_state: str | bytes | bytearray | memoryview | dict,
         speed: float,
     ) -> bytes:
         """Synthesize one text segment to raw 16-bit PCM."""
@@ -186,13 +187,15 @@ class TTSEngine:
 def _encode_synthesis_request(
     *,
     text: str,
-    voice_state: str | bytes | bytearray | memoryview,
+    voice_state: str | bytes | bytearray | memoryview | dict,
     speed: float,
 ) -> bytes:
     if isinstance(voice_state, str):
         state: dict[str, str] = {"kind": "predefined", "name": voice_state}
     else:
-        if isinstance(voice_state, bytearray):
+        if isinstance(voice_state, dict):
+            voice_state = dump_voice_state_safetensors_bytes(voice_state)
+        elif isinstance(voice_state, bytearray):
             voice_state = bytes(voice_state)
         elif isinstance(voice_state, memoryview):
             voice_state = voice_state.tobytes()
@@ -289,7 +292,7 @@ def _load_request_voice_state(model, voice_state: dict):
         return model.get_state_for_audio_prompt(voice_state["name"])
     if kind == "serialized" and isinstance(voice_state.get("data"), str):
         state_bytes = base64.b64decode(voice_state["data"].encode("ascii"), validate=True)
-        return load_safe_voice_state_bytes(state_bytes)
+        return load_safe_voice_state_safetensors_bytes(state_bytes)
     raise RuntimeError("TTS engine received malformed voice_state")
 
 

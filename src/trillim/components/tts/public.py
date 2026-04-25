@@ -25,8 +25,10 @@ from trillim.components.tts._validation import (
     validate_speed,
 )
 from trillim.components.tts._voices import (
-    VoiceStore,
     copy_source_audio,
+    delete_custom_voice,
+    load_custom_voice_states,
+    publish_custom_voice,
     spool_voice_bytes,
 )
 from trillim.components.tts._worker import (
@@ -59,9 +61,8 @@ class TTS(Component):
         self._tokenizer_lock = asyncio.Lock()
         self._tokenizer = None
         self._owner_loop: AbstractEventLoop | None = None
-        self._voice_store: VoiceStore | None = None
         self._built_in_voice_names: tuple[str, ...] = ()
-        self._voice_state_cache: dict[str, str | bytes] = {}
+        self._voice_state_cache: dict[str, str | dict] = {}
         self._spool_dir = Path(tempfile.gettempdir()) / "trillim-tts"
         self._stop_event = asyncio.Event()
         self._stop_event.set()
@@ -81,15 +82,15 @@ class TTS(Component):
             importlib.import_module("soundfile")
             importlib.import_module("pocket_tts")
             built_in_voice_names = _load_built_in_voice_names()
-            voice_store = VoiceStore(
+            await self._engine.start()
+            custom_voice_states = await load_custom_voice_states(
                 VOICE_STORE_ROOT,
                 built_in_voice_names=built_in_voice_names,
             )
-            await self._engine.start()
             self._built_in_voice_names = built_in_voice_names
-            self._voice_store = voice_store
             self._voice_state_cache = {
-                name: name for name in built_in_voice_names
+                **{name: name for name in built_in_voice_names},
+                **custom_voice_states,
             }
             self._stop_event.clear()
             self._started = True
@@ -110,14 +111,19 @@ class TTS(Component):
     async def list_voices(self) -> list[str]:
         """Return the visible built-in and custom voice names."""
         self._require_owner_loop()
-        return await self._require_voice_store().list_names()
+        self._require_started()
+        custom_names = sorted(
+            name for name in self._voice_state_cache if name not in self._built_in_voice_names
+        )
+        return [*self._built_in_voice_names, *custom_names]
 
     async def register_voice(self, name: str, audio: bytes | str | Path) -> str:
         """Register one custom voice from bytes or one caller-owned path."""
         self._require_owner_loop()
-        voice_store = self._require_voice_store()
+        self._require_started()
         normalized_name = normalize_required_name(name, field_name="name")
-        await voice_store.ensure_name_available(normalized_name)
+        if normalized_name in self._voice_state_cache:
+            raise InvalidRequestError(f"voice '{normalized_name}' already exists")
         if isinstance(audio, bytes):
             owned_upload = await spool_voice_bytes(audio, spool_dir=self._spool_dir)
         elif isinstance(audio, (str, Path)):
@@ -125,12 +131,14 @@ class TTS(Component):
         else:
             raise InvalidRequestError("audio must be bytes, str, or Path")
         try:
-            registered_name = await voice_store.register_owned_upload(
+            registered_name, voice_state = await publish_custom_voice(
+                VOICE_STORE_ROOT,
                 name=normalized_name,
                 upload=owned_upload,
                 build_voice_state=self._build_voice_state,
+                existing_names=set(self._voice_state_cache),
             )
-            self._voice_state_cache.pop(registered_name, None)
+            self._voice_state_cache[registered_name] = voice_state
             return registered_name
         finally:
             owned_upload.path.unlink(missing_ok=True)
@@ -138,10 +146,16 @@ class TTS(Component):
     async def delete_voice(self, name: str) -> str:
         """Delete one managed custom voice."""
         self._require_owner_loop()
-        deleted_name = await self._require_voice_store().delete(
-            normalize_required_name(name, field_name="name"),
-        )
-        self._voice_state_cache.pop(deleted_name, None)
+        self._require_started()
+        normalized_name = normalize_required_name(name, field_name="name")
+        if normalized_name in self._built_in_voice_names:
+            raise InvalidRequestError(
+                f"voice '{normalized_name}' is built in and cannot be deleted"
+            )
+        if normalized_name not in self._voice_state_cache:
+            raise KeyError(normalized_name)
+        self._voice_state_cache.pop(normalized_name, None)
+        deleted_name = await delete_custom_voice(VOICE_STORE_ROOT, name=normalized_name)
         return deleted_name
 
     async def open_session(
@@ -172,7 +186,7 @@ class TTS(Component):
         await self._load_voice_state(normalized)
         return normalized
 
-    async def _resolve_voice_state(self, voice: str) -> tuple[str | bytes, None]:
+    async def _resolve_voice_state(self, voice: str) -> tuple[str | dict, None]:
         self._require_owner_loop()
         return await self._load_voice_state(voice), None
 
@@ -184,7 +198,7 @@ class TTS(Component):
     ) -> bytes:
         self._require_owner_loop()
         self._require_started()
-        if not isinstance(voice_state, (str, bytes, bytearray, memoryview)):
+        if not isinstance(voice_state, (str, dict)):
             raise InvalidRequestError("voice state is malformed")
         return await self._engine.synthesize_segment(
             text,
@@ -200,29 +214,14 @@ class TTS(Component):
                 self._tokenizer = load_pocket_tts_tokenizer()
             return self._tokenizer
 
-    async def _load_voice_state(self, voice: str) -> str | bytes:
+    async def _load_voice_state(self, voice: str) -> str | dict:
         self._require_owner_loop()
         self._require_started()
         normalized = normalize_required_name(voice, field_name="voice")
         cached = self._voice_state_cache.get(normalized)
         if cached is not None:
             return cached
-        resolved = await self._require_voice_store().resolve_for_session(
-            normalized,
-            spool_dir=self._spool_dir,
-        )
-        try:
-            if resolved.kind == "predefined":
-                state: str | bytes = resolved.reference
-            elif resolved.kind == "state_file":
-                state = Path(resolved.reference).read_bytes()
-            else:
-                raise InvalidRequestError(f"unsupported voice kind: {resolved.kind}")
-        finally:
-            if resolved.cleanup_path is not None:
-                resolved.cleanup_path.unlink(missing_ok=True)
-        self._voice_state_cache[normalized] = state
-        return state
+        raise InvalidRequestError(f"unknown voice: {normalized}")
 
     async def _build_voice_state(self, audio_path: Path) -> bytes:
         try:
@@ -236,11 +235,6 @@ class TTS(Component):
     def _require_started(self) -> None:
         if self._stopped():
             raise ComponentLifecycleError("TTS is not running")
-
-    def _require_voice_store(self) -> VoiceStore:
-        self._require_started()
-        assert self._voice_store is not None
-        return self._voice_store
 
     def _require_owner_loop(self) -> None:
         loop = asyncio.get_running_loop()
