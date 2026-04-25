@@ -1,9 +1,9 @@
 """Tests for skeletal component packages."""
 
 from contextlib import ExitStack
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from fastapi import APIRouter
 
@@ -18,6 +18,7 @@ from tests.components.llm.support import (
     make_runtime_model,
     patched_model_store,
 )
+from tests.components.tts.support import patched_tts_environment
 
 
 class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
@@ -42,8 +43,11 @@ class ComponentSkeletonTests(unittest.IsolatedAsyncioTestCase):
         stt = STT()
         await stt.start()
         await stt.stop()
-        await TTS().start()
-        await TTS().stop()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patched_tts_environment(Path(temp_dir) / "voices"):
+                tts = TTS()
+                await tts.start()
+                await tts.stop()
 
     async def test_component_names_match_expected_runtime_names(self):
         llm = LLM(
