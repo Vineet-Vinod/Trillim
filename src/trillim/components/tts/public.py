@@ -194,7 +194,6 @@ class TTS(Component):
         self,
         text: str,
         voice_state: object,
-        speed: float,
     ) -> bytes:
         self._require_owner_loop()
         self._require_started()
@@ -204,7 +203,6 @@ class TTS(Component):
             return await self._engine.synthesize_segment(
                 text,
                 voice_state=voice_state,
-                speed=speed,
             )
 
     async def _get_tokenizer(self):

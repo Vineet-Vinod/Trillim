@@ -20,7 +20,6 @@ from trillim.components.tts._limits import (
 from trillim.components.tts._validation import (
     dump_voice_state_safetensors_bytes,
     load_safe_voice_state_safetensors_bytes,
-    validate_speed,
     validate_text,
     validate_voice_state_bytes,
 )
@@ -73,15 +72,12 @@ class TTSEngine:
         text: str,
         *,
         voice_state: str | bytes | bytearray | memoryview | dict,
-        speed: float,
     ) -> bytes:
         """Synthesize one text segment to raw 16-bit PCM."""
         text = validate_text(text)
-        speed = validate_speed(speed)
         request = _encode_synthesis_request(
             text=text,
             voice_state=voice_state,
-            speed=speed,
         )
 
         process = self._process
@@ -250,7 +246,6 @@ def _encode_synthesis_request(
     *,
     text: str,
     voice_state: str | bytes | bytearray | memoryview | dict,
-    speed: float,
 ) -> bytes:
     if isinstance(voice_state, str):
         state: dict[str, str] = {"kind": "predefined", "name": voice_state}
@@ -272,7 +267,6 @@ def _encode_synthesis_request(
             "command": "synthesize",
             "text": text,
             "voice_state": state,
-            "speed": speed,
         },
         separators=(",", ":"),
     ).encode("utf-8")

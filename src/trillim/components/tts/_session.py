@@ -231,11 +231,10 @@ class _TTSSession(TTSSession):
         self._resume_event.set()
         self._state = _TTSSessionFSM.RUNNING
         voice = self._voice
-        speed = self._speed
         voice_state, cleanup_path = await self._tts._resolve_voice_state(voice)
         self._cleanup_path = cleanup_path
         self._task = asyncio.create_task(
-            self._produce(text, voice_state=voice_state, speed=speed)
+            self._produce(text, voice_state=voice_state)
         )
         try:
             while True:
@@ -258,21 +257,21 @@ class _TTSSession(TTSSession):
         finally:
             self._stream_active = False
 
-    async def _produce(self, text: str, *, voice_state: object, speed: float) -> None:
+    async def _produce(self, text: str, *, voice_state: object) -> None:
         try:
             tokenizer = await self._tts._get_tokenizer()
             segments = tuple(iter_text_segments(text, tokenizer))
             for index, segment in enumerate(segments):
                 if self._stopped():
                     break
-                pcm = await self._tts._synthesize_segment(segment, voice_state, speed)
+                pcm = await self._tts._synthesize_segment(segment, voice_state)
                 if self._stopped():
                     break
                 await self._audio_queue.put(
                     _postprocess_segment_pcm(
                         pcm,
                         text=segment,
-                        speed=speed,
+                        speed=self._speed,
                         add_pause=index < len(segments) - 1,
                     )
                 )
