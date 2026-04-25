@@ -303,6 +303,8 @@ Public helpers:
 Custom voice names and `voice` selectors accept only ASCII letters and digits.
 Custom voices are stored as Pocket TTS-native `.safetensors` under `~/.trillim/voices`.
 Legacy `.state` files and invalid safetensors files are skipped at startup with warnings and do not appear in `list_voices()`.
+The runtime voice cache is the source of truth while the component is running; disk storage is kept in sync on a best-effort basis.
+To replace a custom voice, delete it first and then register the same name again. Built-in voices cannot be deleted or shadowed.
 
 Session rules that matter:
 
@@ -315,8 +317,9 @@ Session rules that matter:
 - `set_speed()` is allowed during synthesis and is a best-effort live update for later segments.
 - `pause()` stops yielding queued chunks to the caller until `resume()`.
 - `close()` cancels any active synthesis, clears buffered audio, and leaves the session reusable.
+- If a session outlives `TTS.stop()`, the next synthesis raises `ComponentLifecycleError`; stopped sessions do not return successful empty audio.
 - Direct async `TTS` use is bound to one event loop. Create a new `TTS()` per thread or event loop.
-- The SDK serializes engine access internally. The HTTP router still enforces one live speech request at a time and rejects concurrent requests with `429`.
+- The SDK serializes engine access internally. The HTTP router enforces one live TTS request at a time across speech and voice-management routes and rejects concurrent requests with `429`.
 
 ## Public Error Types You Will See First
 

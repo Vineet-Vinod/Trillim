@@ -71,6 +71,7 @@ Important implications:
 - `set_voice()` is rejected while synthesis is active
 - `set_speed()` is best-effort during active synthesis and affects later post-processing
 - `close()` cancels any active synthesis, clears buffered audio, and leaves the session reusable
+- stopped owner components surface as `ComponentLifecycleError`; sessions do not silently complete as successful empty audio after `TTS.stop()`
 
 ## Safe-Boundary Control Semantics
 
@@ -186,12 +187,15 @@ The runtime avoids unbounded queues and unbounded retries by design.
 ### Custom Voices
 
 - max stored voices: `64`
+- built-in Pocket TTS voices do not count against the custom voice quota
 - max upload size per voice: `10 MiB`
 - max serialized voice state per voice: `64 MiB`
 - total stored custom voice bytes: `100 MiB`
 - voice-state build timeout: `30s`
 - custom voice files use Pocket TTS-native `.safetensors`
 - legacy `.state` files and invalid voice payloads are skipped with warnings at startup
+- runtime voice state is authoritative while `TTS` is running; on-disk custom voice storage is synchronized best-effort
+- custom voices can be replaced by deleting and then registering the same name; built-in voices cannot be deleted or shadowed
 
 ## Progress Timeout Model
 
@@ -213,7 +217,7 @@ For STT specifically:
 
 For TTS specifically:
 
-- the HTTP speech route enforces single-request admission and rejects concurrent speech requests with `429`
+- the HTTP TTS routes enforce single-request admission across speech and voice-management requests and reject concurrent requests with `429`
 - the SDK path allows multiple sessions, but all engine calls are serialized by the owning `TTS` instance
 - direct async `TTS` use is bound to one event loop; create one component instance per thread or event loop
 
