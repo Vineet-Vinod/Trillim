@@ -236,11 +236,12 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await tts.stop()
 
-    async def test_session_created_before_stop_yields_no_audio_after_stop(self):
+    async def test_session_created_before_stop_raises_after_stop(self):
         tts = await self._start_tts()
         session = await tts.open_session()
         await tts.stop()
-        self.assertEqual(await session.collect("hello"), b"")
+        with self.assertRaisesRegex(ComponentLifecycleError, "component has been stopped"):
+            await session.collect("hello")
         self.assertEqual(session.state, "idle")
 
     async def test_direct_async_use_is_bound_to_one_event_loop(self):

@@ -24,7 +24,7 @@ from trillim.components.tts._limits import (
 )
 from trillim.components.tts._segmenter import iter_text_segments
 from trillim.components.tts._validation import validate_speed, validate_text
-from trillim.errors import SessionBusyError
+from trillim.errors import ComponentLifecycleError, SessionBusyError
 
 
 _TTS_SESSION_OWNER_TOKEN = object()
@@ -218,7 +218,7 @@ class _TTSSession(TTSSession):
 
     async def _synthesize(self, text: str) -> AsyncIterator[bytes]:
         if self._stopped():
-            return
+            raise ComponentLifecycleError("TTS component has been stopped")
         if self._stream_active or not self._done_event.is_set():
             raise SessionBusyError("TTSSession is already synthesizing")
         self._stream_active = True
@@ -236,8 +236,7 @@ class _TTSSession(TTSSession):
             )
             while True:
                 if self._stopped():
-                    await self.close()
-                    break
+                    raise ComponentLifecycleError("TTS component has been stopped")
                 if self._state is _TTSSessionFSM.PAUSED:
                     await self._resume_event.wait()
                     continue
