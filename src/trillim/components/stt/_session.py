@@ -6,7 +6,12 @@ import wave
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from trillim.components.stt._limits import MAX_UPLOAD_BYTES
+from trillim.components.stt._limits import (
+    MAX_UPLOAD_BYTES,
+    PCM_CHANNELS,
+    PCM_SAMPLE_RATE,
+    PCM_WIDTH_BYTES,
+)
 from trillim.errors import InvalidRequestError, SessionBusyError
 
 if TYPE_CHECKING:
@@ -17,9 +22,6 @@ _STT_SESSION_CONSTRUCTION_ERROR = (
     "STTSession cannot be constructed directly; use STT.open_session()"
 )
 _ALLOW_STT_SESSION_SUBCLASS = False
-_PCM_WIDTH_BYTES = 2
-_PCM_CHANNELS = 1
-_PCM_SAMPLE_RATE = 16000
 
 
 class _STTSessionFSM(Enum):
@@ -132,7 +134,7 @@ class _STTSession(STTSession):
         return self._validate_pcm(audio)
 
     def _validate_pcm(self, pcm: bytes) -> bytes:
-        if len(pcm) % _PCM_WIDTH_BYTES != 0:
+        if len(pcm) % PCM_WIDTH_BYTES != 0:
             raise InvalidRequestError("PCM audio must contain whole 16-bit samples")
         if len(pcm) > MAX_UPLOAD_BYTES:
             raise InvalidRequestError(f"PCM audio exceeds {MAX_UPLOAD_BYTES} bytes")
@@ -166,13 +168,13 @@ class _STTSession(STTSession):
         import numpy as np
 
         samples = self._decode_pcm_samples(pcm, width)
-        if channels != _PCM_CHANNELS:
+        if channels != PCM_CHANNELS:
             frame_count = len(samples) // channels
             if frame_count * channels != len(samples):
                 raise InvalidRequestError("invalid WAV audio")
             samples = samples.reshape(frame_count, channels).mean(axis=1)
-        if rate != _PCM_SAMPLE_RATE:
-            target_count = max(1, round(len(samples) * _PCM_SAMPLE_RATE / rate))
+        if rate != PCM_SAMPLE_RATE:
+            target_count = max(1, round(len(samples) * PCM_SAMPLE_RATE / rate))
             source_positions = np.arange(len(samples), dtype=np.float32)
             target_positions = np.linspace(
                 0.0,

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class WorkerConfig:
-    """Fixed worker runtime settings for Phase 4."""
+    """Fixed worker runtime settings."""
 
     model_name: str
     device: str
