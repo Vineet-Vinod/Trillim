@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-CURRENT_FORMAT_VERSION = 4
+CURRENT_FORMAT_VERSION = 5
 
 
 def canonicalize_model_config(config: dict) -> dict:

@@ -660,7 +660,11 @@ class QuantizeTests(unittest.TestCase):
             norm_entry = next(
                 entry for entry in payload["tensors"] if entry["row"] == 32 and entry["col"] == 1
             )
-            self.assertEqual(quantized_entry["action"], manifest.ACTION_Q8_0_QUANTIZE)
+            self.assertEqual(
+                quantized_entry["action"],
+                manifest.ACTION_Q8_0_BLOCKED_32_QUANTIZE,
+            )
+            self.assertEqual(quantized_entry["padded_row"], 128)
             self.assertEqual(norm_entry["action"], manifest.ACTION_BF16_RAW)
 
             output_dir = root / "qwen3-out"

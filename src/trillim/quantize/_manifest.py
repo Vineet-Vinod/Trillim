@@ -19,6 +19,7 @@ ACTION_REPACK_TERNARY = 3
 ACTION_Q1_0_128 = 4
 ACTION_GROUP_TERNARY_QUANTIZE = 5
 ACTION_Q8_0_QUANTIZE = 6
+ACTION_Q8_0_BLOCKED_32_QUANTIZE = 7
 
 SECTION_TEXT_CORE = 1
 
@@ -68,7 +69,7 @@ def _quantized_tensor_action(dtype_str: str, arch_type: ArchitectureType) -> int
     if arch_type == ArchitectureType.BONSAI_TERNARY:
         return ACTION_GROUP_TERNARY_QUANTIZE
     if arch_type == ArchitectureType.QWEN3:
-        return ACTION_Q8_0_QUANTIZE
+        return ACTION_Q8_0_BLOCKED_32_QUANTIZE
     if dtype_str in {"I8", "U8"}:
         return ACTION_REPACK_TERNARY
     return ACTION_TERNARY_QUANTIZE
@@ -253,6 +254,9 @@ def build_manifest(
             else:
                 action = ACTION_BF16_RAW
 
+            if action == ACTION_Q8_0_BLOCKED_32_QUANTIZE:
+                padded_row = _round_up(padded_row, 32)
+
             has_scale = 0
             scale_shard_idx = 0
             scale_offset = 0
@@ -355,6 +359,10 @@ def build_manifest(
                     handle.write(struct.pack("<Q", target["b_offset"]))
                     handle.write(struct.pack("<Q", target["b_size"]))
     return manifest_path
+
+
+def _round_up(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
 
 
 def run_model_quantizer(
