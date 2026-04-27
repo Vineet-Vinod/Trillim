@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from typing import Iterable
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 
 from trillim.components import Component
 from trillim.errors import ComponentLifecycleError
@@ -46,38 +45,13 @@ def build_app(components: Iterable[Component]) -> FastAPI:
         finally:
             await _stop_components(started)
 
-    app = FastAPI(title="Trillim API", version="0.7.0", lifespan=lifespan)
+    app = FastAPI(title="Trillim API", version="0.10.0", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz():
-        unhealthy_components: dict[str, dict[str, object]] = {}
-        for component in items:
-            detail = _component_unhealthy_detail(component)
-            if detail is not None:
-                unhealthy_components[component.component_name] = detail
-        if unhealthy_components:
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "status": "degraded",
-                    "components": unhealthy_components,
-                },
-            )
         return {"status": "ok"}
 
     for component in items:
         app.include_router(component.router())
 
     return app
-
-
-def _component_unhealthy_detail(component: Component) -> dict[str, object] | None:
-    model_info = getattr(component, "model_info", None)
-    if not callable(model_info):
-        return None
-    info = model_info()
-    state = getattr(info, "state", None)
-    state_value = getattr(state, "value", state)
-    if state_value in {None, "running"}:
-        return None
-    return {"state": state_value}
