@@ -244,6 +244,11 @@ class _TTSSession(TTSSession):
                     yield await self._audio_queue.get()
                     continue
                 if self._done_event.is_set():
+                    self._state = (
+                        _TTSSessionFSM.DONE
+                        if self._error is None
+                        else _TTSSessionFSM.IDLE
+                    )
                     break
                 # If producer is producing, but queue is empty now, just sleep for
                 # a bit till the next chunk comes in, rather than infinitely spinning
@@ -304,9 +309,16 @@ class _TTSSession(TTSSession):
         *,
         clear_queue: bool = False,
     ) -> None:
-        self._state = state
+        preserve_pause = (
+            self._state is _TTSSessionFSM.PAUSED
+            and state is _TTSSessionFSM.DONE
+            and not clear_queue
+        )
+        if not preserve_pause:
+            self._state = state
         self._error = error
-        self._resume_event.set()
+        if not preserve_pause:
+            self._resume_event.set()
         if clear_queue:
             self._clear_queue()
         self._done_event.set()
