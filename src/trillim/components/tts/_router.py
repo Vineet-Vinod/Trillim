@@ -37,7 +37,9 @@ def build_router(tts) -> APIRouter:
     @router.get("/v1/voices")
     async def list_voices():
         if request_lock.locked():
-            raise HTTPException(status_code=429, detail="TTS is already handling a request")
+            raise _as_http_error(
+                AdmissionRejectedError("TTS is already handling a request")
+            )
         await request_lock.acquire()
         try:
             voices = await tts.list_voices()
@@ -50,7 +52,9 @@ def build_router(tts) -> APIRouter:
     @router.post("/v1/voices")
     async def create_voice(request: Request):
         if request_lock.locked():
-            raise HTTPException(status_code=429, detail="TTS is already handling a request")
+            raise _as_http_error(
+                AdmissionRejectedError("TTS is already handling a request")
+            )
         await request_lock.acquire()
         try:
             metadata = validate_http_voice_upload_request(
@@ -69,7 +73,9 @@ def build_router(tts) -> APIRouter:
     @router.delete("/v1/voices/{voice_name}")
     async def delete_voice(voice_name: str):
         if request_lock.locked():
-            raise HTTPException(status_code=429, detail="TTS is already handling a request")
+            raise _as_http_error(
+                AdmissionRejectedError("TTS is already handling a request")
+            )
         await request_lock.acquire()
         try:
             deleted_name = await tts.delete_voice(voice_name)
@@ -81,6 +87,14 @@ def build_router(tts) -> APIRouter:
 
     @router.post("/v1/audio/speech")
     async def audio_speech(request: Request):
+        if request_lock.locked():
+            raise _as_http_error(
+                AdmissionRejectedError("TTS is busy; only one live session is allowed")
+            )
+        await request_lock.acquire()
+        release_in_router = True
+        session = None
+
         try:
             speech_request = validate_http_speech_request(
                 content_length=request.headers.get("content-length"),
@@ -88,28 +102,24 @@ def build_router(tts) -> APIRouter:
                 speed=request.headers.get("speed"),
                 default_speed=DEFAULT_SPEED,
             )
-        except Exception as exc:
-            raise _as_http_error(exc) from exc
-
-        if request_lock.locked():
-            raise _as_http_error(AdmissionRejectedError("TTS is busy; only one live session is allowed"))
-        await request_lock.acquire()
-
-        try:
             body = await _read_bounded_body(request, MAX_HTTP_TEXT_BYTES)
             _validate_actual_content_length(body, speech_request.content_length)
             text = validate_http_speech_body(body)
-            session = await tts.open_session(
+            session = tts.open_session(
                 voice=speech_request.voice,
                 speed=speech_request.speed,
             )
+            response = StreamingResponse(
+                _stream_speech_session(session, text, request_lock),
+                media_type="text/event-stream",
+            )
+            release_in_router = False
+            return response
         except Exception as exc:
-            request_lock.release()
             raise _as_http_error(exc) from exc
-        return StreamingResponse(
-            _stream_speech_session(session, text, request_lock),
-            media_type="text/event-stream",
-        )
+        finally:
+            if release_in_router:
+                request_lock.release()
 
     return router
 

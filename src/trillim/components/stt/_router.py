@@ -10,18 +10,26 @@ from trillim.components.stt._limits import (
     UPLOAD_PROGRESS_TIMEOUT_SECONDS,
 )
 from trillim.components.stt._validation import PayloadTooLargeError, validate_http_request
-from trillim.errors import ComponentLifecycleError, InvalidRequestError, ProgressTimeoutError
+from trillim.errors import (
+    AdmissionRejectedError,
+    ComponentLifecycleError,
+    InvalidRequestError,
+    ProgressTimeoutError,
+)
 
 
 def build_router(stt) -> APIRouter:
     router = APIRouter()
-    transcribe_lock = asyncio.Lock()
+    request_lock = asyncio.Lock()
 
     @router.post("/v1/audio/transcriptions")
     async def audio_transcriptions(request: Request):
-        if transcribe_lock.locked():
-            raise HTTPException(status_code=429, detail="STT is already handling a request")
-        await transcribe_lock.acquire()
+        if request_lock.locked():
+            raise _as_http_error(
+                AdmissionRejectedError("STT is already handling a request")
+            )
+        await request_lock.acquire()
+        session = None
         try:
             validated_request = validate_http_request(
                 content_type=request.headers.get("content-type"),
@@ -40,7 +48,11 @@ def build_router(stt) -> APIRouter:
         except Exception as exc:
             raise _as_http_error(exc) from exc
         finally:
-            transcribe_lock.release()
+            try:
+                if session is not None:
+                    await session.close()
+            finally:
+                request_lock.release()
         return {"text": text}
 
     return router
@@ -81,6 +93,8 @@ def _as_http_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, ProgressTimeoutError):
         return HTTPException(status_code=504, detail=str(exc))
+    if isinstance(exc, AdmissionRejectedError):
+        return HTTPException(status_code=429, detail=str(exc))
     if isinstance(exc, ComponentLifecycleError):
         return HTTPException(status_code=503, detail=str(exc))
     return HTTPException(status_code=503, detail=str(exc))

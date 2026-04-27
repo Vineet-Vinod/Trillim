@@ -50,11 +50,13 @@ def build_router(llm, *, allow_hot_swap: bool) -> APIRouter:
 
     @router.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        payload = await _read_json_body(request, REQUEST_BODY_LIMIT_BYTES)
         if request_lock.locked():
             raise _as_http_error(AdmissionRejectedError("LLM is already handling a request"))
         await request_lock.acquire()
+        release_in_router = True
+        session = None
         try:
+            payload = await _read_json_body(request, REQUEST_BODY_LIMIT_BYTES)
             model_name = llm._active_model_name()
             if model_name is None:
                 raise ComponentLifecycleError("LLM is not running")
@@ -62,42 +64,36 @@ def build_router(llm, *, allow_hot_swap: bool) -> APIRouter:
             response_id = _response_id()
             created = int(time.time())
             if chat_request.stream:
-                session = None
+                session = _session_for_request(llm, chat_request)
+                response = StreamingResponse(
+                    _stream_chat_response(
+                        session,
+                        final_user_content=chat_request.messages[-1].content,
+                        sampling=_sampling_kwargs(chat_request),
+                        response_id=response_id,
+                        created=created,
+                        model_name=model_name,
+                        request_lock=request_lock,
+                    ),
+                    media_type="text/event-stream",
+                )
+                release_in_router = False
+                return response
+            session = _session_for_request(llm, chat_request)
+            text = await session.collect(
+                chat_request.messages[-1].content,
+                **_sampling_kwargs(chat_request),
+            )
+            usage_payload = _usage_payload(getattr(session, "_last_usage", None))
+        except Exception as exc:
+            raise _as_http_error(exc) from exc
+        finally:
+            if release_in_router:
                 try:
-                    session = _session_for_request(llm, chat_request)
-                    return StreamingResponse(
-                        _stream_chat_response(
-                            session,
-                            final_user_content=chat_request.messages[-1].content,
-                            sampling=_sampling_kwargs(chat_request),
-                            response_id=response_id,
-                            created=created,
-                            model_name=model_name,
-                            request_lock=request_lock,
-                        ),
-                        media_type="text/event-stream",
-                    )
-                except Exception:
                     if session is not None:
                         await session.close()
+                finally:
                     request_lock.release()
-                    raise
-            session = None
-            try:
-                session = _session_for_request(llm, chat_request)
-                text = await session.collect(
-                    chat_request.messages[-1].content,
-                    **_sampling_kwargs(chat_request),
-                )
-                usage_payload = _usage_payload(getattr(session, "_last_usage", None))
-            finally:
-                if session is not None:
-                    await session.close()
-                request_lock.release()
-        except Exception as exc:
-            if request_lock.locked():
-                request_lock.release()
-            raise _as_http_error(exc) from exc
         return {
             "id": response_id,
             "object": "chat.completion",
@@ -117,28 +113,29 @@ def build_router(llm, *, allow_hot_swap: bool) -> APIRouter:
 
         @router.post("/v1/models/swap")
         async def swap_model_route(request: Request):
-            payload = await _read_json_body(request, REQUEST_BODY_LIMIT_BYTES)
+            if request_lock.locked():
+                raise _as_http_error(
+                    AdmissionRejectedError("LLM is already handling a request")
+                )
+            await request_lock.acquire()
             try:
+                payload = await _read_json_body(request, REQUEST_BODY_LIMIT_BYTES)
                 swap_request = validate_swap_request(payload)
-                if request_lock.locked():
-                    raise AdmissionRejectedError("LLM is already handling a request")
-                await request_lock.acquire()
-                try:
-                    await llm.swap_model(
-                        swap_request.model_dir,
-                        num_threads=swap_request.num_threads,
-                        lora_dir=swap_request.lora_dir,
-                        lora_quant=swap_request.lora_quant,
-                        unembed_quant=swap_request.unembed_quant,
-                        harness_name=swap_request.harness_name,
-                        search_provider=swap_request.search_provider,
-                        search_token_budget=swap_request.search_token_budget,
-                    )
-                    model_name = llm._active_model_name()
-                finally:
-                    request_lock.release()
+                await llm.swap_model(
+                    swap_request.model_dir,
+                    num_threads=swap_request.num_threads,
+                    lora_dir=swap_request.lora_dir,
+                    lora_quant=swap_request.lora_quant,
+                    unembed_quant=swap_request.unembed_quant,
+                    harness_name=swap_request.harness_name,
+                    search_provider=swap_request.search_provider,
+                    search_token_budget=swap_request.search_token_budget,
+                )
+                model_name = llm._active_model_name()
             except Exception as exc:
                 raise _as_http_error(exc) from exc
+            finally:
+                request_lock.release()
             return {
                 "object": "model.swap",
                 "model": model_name,
