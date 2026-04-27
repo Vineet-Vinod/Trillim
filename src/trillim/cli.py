@@ -36,6 +36,7 @@ class _LocalBundle:
     size_bytes: int
     size_human: str
 
+
 def _validate_pull_id(model_id: str) -> str:
     namespace, name = _model_store.parse_store_id(model_id, error_type=RuntimeError)
     if namespace != "Trillim":
@@ -87,10 +88,14 @@ def _warn_on_trillim_config(path: Path) -> None:
         )
 
 
-def _require_remote_code_opt_in(store_id: str, *, label: str, trust_remote_code: bool) -> None:
+def _require_remote_code_opt_in(
+    store_id: str, *, label: str, trust_remote_code: bool
+) -> None:
     if trust_remote_code:
         return
-    bundle_path = _model_store.resolve_existing_store_id(store_id, error_type=RuntimeError)
+    bundle_path = _model_store.resolve_existing_store_id(
+        store_id, error_type=RuntimeError
+    )
     config_path = bundle_path / "trillim_config.json"
     if not config_path.is_file():
         return
@@ -207,10 +212,7 @@ def _print_local_table(title: str, bundles: list[_LocalBundle]) -> None:
 
 
 def _local_downloaded_ids() -> set[str]:
-    return {
-        bundle.model_id
-        for bundle in _iter_local_bundles("Trillim")
-    }
+    return {bundle.model_id for bundle in _iter_local_bundles("Trillim")}
 
 
 def _downloaded_statuses() -> dict[str, str]:
@@ -332,8 +334,8 @@ def _preflight_voice_dependencies() -> None:
         )
 
 
-def _stream_assistant_turn(runtime: Runtime, session, messages_snapshot) -> object:
-    stream = session.stream_chat()
+def _stream_assistant_turn(session, prompt: str) -> object:
+    stream = session.generate(prompt)
     saw_token = False
     try:
         for event in stream:
@@ -451,10 +453,8 @@ def _run_chat(
                     session = runtime.llm.open_session()
                     print("Conversation reset.")
                     continue
-                session.add_user(prompt)
-                snapshot = session.messages
                 print("assistant: ", end="", flush=True)
-                session = _stream_assistant_turn(runtime, session, snapshot)
+                session = _stream_assistant_turn(session, prompt)
         finally:
             try:
                 session.close()
@@ -480,7 +480,7 @@ def _run_serve(
     components = [llm]
     if voice:
         components.extend([STT(), TTS()])
-    Server(*components, allow_hot_swap=False).run(host=DEFAULT_HOST, port=DEFAULT_PORT)
+    Server(*components).run(host=DEFAULT_HOST, port=DEFAULT_PORT)
     return 0
 
 
@@ -576,7 +576,9 @@ def build_parser() -> argparse.ArgumentParser:
         "quantize",
         help="Quantize one local model directory or adapter directory into Local/",
     )
-    quantize_parser.add_argument("model_dir", help="Local filesystem path to the source model directory")
+    quantize_parser.add_argument(
+        "model_dir", help="Local filesystem path to the source model directory"
+    )
     quantize_parser.add_argument(
         "adapter_dir",
         nargs="?",

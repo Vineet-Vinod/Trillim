@@ -1,13 +1,13 @@
-"""Managed custom-voice storage for the TTS component."""
+"""Custom-voice persistence helpers for the TTS component."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import tempfile
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,23 +17,28 @@ from trillim.components.tts._limits import (
     MAX_VOICE_STATE_BYTES,
     MAX_VOICE_UPLOAD_BYTES,
     VOICE_MANIFEST_NAME,
+    VOICE_STATE_SUFFIX,
+    LEGACY_VOICE_STATE_SUFFIX,
 )
 from trillim.components.tts._validation import (
     PayloadTooLargeError,
-    load_safe_voice_state_bytes,
+    load_safe_voice_state_safetensors,
     normalize_optional_name,
     normalize_required_name,
     open_validated_source_audio_file,
+    save_voice_state_safetensors,
     validate_source_audio_path,
     validate_voice_bytes,
-    validate_voice_state_bytes,
 )
 from trillim.errors import InvalidRequestError
 from trillim.utils.filesystem import atomic_write_bytes, unlink_if_exists
 
 
+logger = logging.getLogger(__name__)
+
+
 class VoiceStoreTamperedError(RuntimeError):
-    """Raised when managed custom-voice files fail closed."""
+    """Raised when a requested custom-voice write/delete is unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,368 +58,309 @@ class OwnedVoiceUpload:
     size_bytes: int
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedVoice:
-    """One voice reference ready for a synthesis worker."""
+async def load_custom_voice_states(
+    root: Path,
+    *,
+    built_in_voice_names: tuple[str, ...],
+) -> dict[str, dict]:
+    """Discover and load valid persisted custom voices."""
+    built_ins = set(built_in_voice_names)
+    manifest = _load_manifest(root, built_ins=built_ins)
+    loaded: dict[str, dict] = {}
+    for name, entry in manifest.items():
+        state_path = _state_path(root, entry.storage_id)
+        state = _load_optional_state(entry, state_path)
+        if state is not None:
+            loaded[name] = state
+    return loaded
 
-    name: str
-    kind: str
-    reference: str
-    cleanup_path: Path | None = None
 
-
-class VoiceStore:
-    """Own the managed voice directory and manifest."""
-
-    def __init__(self, root: Path, *, built_in_voice_names: tuple[str, ...]) -> None:
-        self._root = Path(root)
-        self._manifest_path = self._root / VOICE_MANIFEST_NAME
-        self._built_ins = tuple(built_in_voice_names)
-        self._lock = asyncio.Lock()
-        self._tamper_error: VoiceStoreTamperedError | None = None
-
-    async def list_names(self) -> list[str]:
-        """Return built-in voices followed by custom voices."""
-        async with self._lock:
-            manifest = self._load_manifest_locked()
-            custom_names = sorted(manifest)
-            return [*self._built_ins, *custom_names]
-
-    async def ensure_name_available(self, name: str) -> None:
-        """Fail if the requested custom voice name already exists."""
-        normalized_name = normalize_required_name(name, field_name="name")
-        async with self._lock:
-            self._ensure_name_available_locked(
-                normalized_name,
-                self._load_manifest_locked(),
-            )
-
-    async def register_owned_upload(
-        self,
-        *,
-        name: str,
-        upload: OwnedVoiceUpload,
-        build_voice_state,
-    ) -> str:
-        """Build and publish one custom voice from an owned upload path."""
-        normalized_name = normalize_required_name(name, field_name="name")
-        async with self._lock:
-            manifest = self._load_manifest_locked()
-            self._ensure_name_available_locked(normalized_name, manifest)
-            state_bytes = validate_voice_state_bytes(
-                await build_voice_state(upload.path)
-            )
-            try:
-                load_safe_voice_state_bytes(state_bytes)
-            except InvalidRequestError as exc:
-                raise RuntimeError("PocketTTS returned malformed voice state") from exc
-            if len(manifest) >= MAX_CUSTOM_VOICES:
-                raise InvalidRequestError(
-                    f"custom voice store already contains {MAX_CUSTOM_VOICES} voices"
-                )
-            total_bytes = sum(entry.size_bytes for entry in manifest.values())
-            if total_bytes + len(state_bytes) > MAX_TOTAL_CUSTOM_VOICE_BYTES:
-                raise InvalidRequestError(
-                    f"custom voice storage exceeds the {MAX_TOTAL_CUSTOM_VOICE_BYTES} byte limit"
-                )
-            storage_id = _storage_id_for_name(normalized_name)
-            entry = ManagedVoiceEntry(
-                name=normalized_name,
-                storage_id=storage_id,
-                size_bytes=len(state_bytes),
-            )
-            state_path = self._state_path(storage_id)
-            self._ensure_store_root_locked()
-            self._raise_if_managed_symlink_locked(state_path)
-            atomic_write_bytes(state_path, state_bytes)
-            next_manifest = dict(manifest)
-            next_manifest[normalized_name] = entry
-            try:
-                self._write_manifest_locked(next_manifest)
-            except Exception:
-                unlink_if_exists(state_path)
-                raise
-            return normalized_name
-
-    async def delete(self, name: str, *, protected_name: str | None = None) -> str:
-        """Delete one managed custom voice by name."""
-        normalized_name = normalize_required_name(name, field_name="name")
-        async with self._lock:
-            if normalized_name in self._built_ins:
-                raise InvalidRequestError(
-                    f"voice '{normalized_name}' is built in and cannot be deleted"
-                )
-            if protected_name is not None and normalized_name == protected_name:
-                raise InvalidRequestError(
-                    f"voice '{normalized_name}' is currently in use as default_voice"
-                )
-            manifest = self._load_manifest_locked()
-            entry = manifest.get(normalized_name)
-            if entry is None:
-                raise KeyError(normalized_name)
-            state_path = self._state_path(entry.storage_id)
-            self._raise_if_managed_symlink_locked(state_path)
-            state_bytes = state_path.read_bytes()
-            next_manifest = dict(manifest)
-            del next_manifest[normalized_name]
-            unlink_if_exists(state_path)
-            try:
-                self._write_manifest_locked(next_manifest)
-            except Exception:
-                atomic_write_bytes(state_path, state_bytes)
-                raise
-            return normalized_name
-
-    async def resolve_for_session(
-        self,
-        name: str,
-        *,
-        spool_dir: Path,
-    ) -> ResolvedVoice:
-        """Resolve one voice name into a worker-ready reference."""
-        normalized_name = normalize_required_name(name, field_name="voice")
-        async with self._lock:
-            if normalized_name in self._built_ins:
-                return ResolvedVoice(
-                    name=normalized_name,
-                    kind="predefined",
-                    reference=normalized_name,
-                )
-            manifest = self._load_manifest_locked()
-            entry = manifest.get(normalized_name)
-            if entry is None:
-                raise InvalidRequestError(f"unknown voice: {normalized_name}")
-            state_bytes = self._load_state_bytes_locked(entry)
-        temp_path = await spool_voice_state_bytes(state_bytes, spool_dir=spool_dir)
-        return ResolvedVoice(
-            name=normalized_name,
-            kind="state_file",
-            reference=str(temp_path),
-            cleanup_path=temp_path,
+async def publish_custom_voice(
+    root: Path,
+    *,
+    name: str,
+    voice_state: dict,
+    existing_names: set[str],
+) -> tuple[str, dict]:
+    """Build, persist, and load one custom voice."""
+    normalized_name = normalize_required_name(name, field_name="name")
+    if normalized_name in existing_names:
+        raise InvalidRequestError(f"voice '{normalized_name}' already exists")
+    manifest = _load_manifest(root, built_ins=set())
+    if normalized_name in manifest:
+        raise InvalidRequestError(f"voice '{normalized_name}' already exists")
+    if len(existing_names - set(manifest)) + len(manifest) >= MAX_CUSTOM_VOICES:
+        raise InvalidRequestError(
+            f"custom voice store already contains {MAX_CUSTOM_VOICES} voices"
         )
 
-    def _load_manifest_locked(self) -> dict[str, ManagedVoiceEntry]:
-        self._raise_if_store_tampered_locked()
-        if not self._root.exists():
-            return {}
-        self._raise_if_managed_symlink_locked(self._root)
-        if not self._root.is_dir():
-            self._mark_store_tampered_locked("voice store root is malformed")
-        if not self._manifest_path.exists():
-            try:
-                has_entries = next(self._root.iterdir(), None) is not None
-            except OSError:
-                self._mark_store_tampered_locked("voice store root is malformed")
-            if has_entries:
-                self._mark_store_tampered_locked("voice manifest is missing")
-            return {}
-        self._raise_if_managed_symlink_locked(self._manifest_path)
-        try:
-            payload = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        if not isinstance(payload, dict):
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        entries = payload.get("voices")
-        if not isinstance(entries, list):
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        manifest: dict[str, ManagedVoiceEntry] = {}
-        for item in entries:
-            entry = self._load_manifest_entry_locked(item)
-            if entry.name in manifest or entry.name in self._built_ins:
-                self._mark_store_tampered_locked("voice manifest is malformed")
-            self._validate_manifest_state_file_locked(entry)
-            manifest[entry.name] = entry
-        self._validate_store_inventory_locked(manifest)
-        return manifest
-
-    def _write_manifest_locked(
-        self,
-        manifest: dict[str, ManagedVoiceEntry],
-    ) -> None:
-        self._ensure_store_root_locked()
-        self._raise_if_managed_symlink_locked(self._manifest_path)
-        payload = {
-            "voices": [
-                {
-                    "name": entry.name,
-                    "storage_id": entry.storage_id,
-                    "size_bytes": entry.size_bytes,
-                }
-                for entry in sorted(manifest.values(), key=lambda item: item.name)
-            ]
-        }
-        atomic_write_bytes(
-            self._manifest_path,
-            json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"),
-        )
-
-    def _ensure_name_available_locked(
-        self,
-        name: str,
-        manifest: dict[str, ManagedVoiceEntry],
-    ) -> None:
-        if name in self._built_ins or name in manifest:
-            raise InvalidRequestError(f"voice '{name}' already exists")
-
-    def _load_state_bytes_locked(self, entry: ManagedVoiceEntry) -> bytes:
-        state_path = self._state_path(entry.storage_id)
-        self._raise_if_managed_symlink_locked(state_path)
-        try:
-            state_bytes = validate_voice_state_bytes(state_path.read_bytes())
-        except (InvalidRequestError, OSError):
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is malformed"
-            )
-        if len(state_bytes) != entry.size_bytes:
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is malformed"
-            )
-        try:
-            load_safe_voice_state_bytes(state_bytes)
-        except InvalidRequestError:
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is malformed"
-            )
-        return state_bytes
-
-    def _ensure_store_root_locked(self) -> None:
-        if self._root.exists():
-            self._raise_if_managed_symlink_locked(self._root)
-            if not self._root.is_dir():
-                self._mark_store_tampered_locked("voice store root is malformed")
-        self._root.mkdir(parents=True, exist_ok=True)
-
-    def _state_path(self, storage_id: str) -> Path:
-        return self._root / f"{storage_id}.state"
-
-    def _raise_if_symlink(self, path: Path, message: str) -> None:
-        if path.is_symlink():
-            raise RuntimeError(message)
-
-    def _load_manifest_entry_locked(self, item: object) -> ManagedVoiceEntry:
-        if not isinstance(item, dict):
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        try:
-            name = item["name"]
-            storage_id = item["storage_id"]
-            size_bytes = item["size_bytes"]
-        except KeyError:
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        try:
-            normalized_name = normalize_optional_name(name, field_name="name")
-        except InvalidRequestError:
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        if (
-            not isinstance(name, str)
-            or not name
-            or normalized_name != name
-            or not isinstance(storage_id, str)
-            or not isinstance(size_bytes, int)
-        ):
-            self._mark_store_tampered_locked("voice manifest is malformed")
+    if not isinstance(voice_state, dict) or not voice_state:
+        raise InvalidRequestError("voice state is malformed")
+    storage_id = _storage_id_for_name(normalized_name)
+    final_path = _state_path(root, storage_id)
+    temp_path = _create_temp_state_path(root)
+    try:
+        save_voice_state_safetensors(voice_state, temp_path)
+        loaded_state = load_safe_voice_state_safetensors(temp_path)
+        size_bytes = temp_path.stat().st_size
         if size_bytes <= 0 or size_bytes > MAX_VOICE_STATE_BYTES:
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        if storage_id != _storage_id_for_name(name):
-            self._mark_store_tampered_locked("voice manifest is malformed")
-        return ManagedVoiceEntry(
-            name=name,
+            raise InvalidRequestError(
+                f"voice state exceeds the {MAX_VOICE_STATE_BYTES} byte limit"
+            )
+        total_bytes = sum(entry.size_bytes for entry in manifest.values())
+        if total_bytes + size_bytes > MAX_TOTAL_CUSTOM_VOICE_BYTES:
+            raise InvalidRequestError(
+                f"custom voice storage exceeds the {MAX_TOTAL_CUSTOM_VOICE_BYTES} byte limit"
+            )
+
+        _ensure_store_root(root)
+        _raise_if_symlink_for_write(final_path)
+        os.replace(temp_path, final_path)
+        next_manifest = dict(manifest)
+        next_manifest[normalized_name] = ManagedVoiceEntry(
+            name=normalized_name,
             storage_id=storage_id,
             size_bytes=size_bytes,
         )
-
-    def _validate_manifest_state_file_locked(self, entry: ManagedVoiceEntry) -> None:
-        state_path = self._state_path(entry.storage_id)
-        self._raise_if_managed_symlink_locked(state_path)
         try:
-            stat_result = state_path.stat()
-        except FileNotFoundError:
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is missing"
-            )
-        except OSError:
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is malformed"
-            )
-        if not state_path.is_file():
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is malformed"
-            )
-        if stat_result.st_size != entry.size_bytes:
-            self._mark_store_tampered_locked(
-                f"custom voice state for '{entry.name}' is malformed"
-            )
-
-    def _validate_store_inventory_locked(
-        self,
-        manifest: dict[str, ManagedVoiceEntry],
-    ) -> None:
-        expected_names = {VOICE_MANIFEST_NAME}
-        expected_names.update(
-            f"{entry.storage_id}.state" for entry in manifest.values()
-        )
-        unexpected: list[str] = []
-        try:
-            children = list(self._root.iterdir())
-        except OSError:
-            self._mark_store_tampered_locked("voice store root is malformed")
-        for child in children:
-            self._raise_if_managed_symlink_locked(child)
-            if child.name not in expected_names:
-                unexpected.append(child.name)
-        if unexpected:
-            unexpected_list = ", ".join(sorted(repr(name) for name in unexpected))
-            self._mark_store_tampered_locked(
-                "voice store contains unexpected files: "
-                f"{unexpected_list}. Delete stale .state files or other unexpected "
-                f"files in {self._root} so that {VOICE_MANIFEST_NAME} matches the "
-                "stored .state files"
-            )
-
-    def _raise_if_managed_symlink_locked(self, path: Path) -> None:
-        try:
-            self._raise_if_symlink(path, "Voice store must not use symlinks")
-        except RuntimeError:
-            self._mark_store_tampered_locked("voice store must not use symlinks")
-
-    def _raise_if_store_tampered_locked(self) -> None:
-        if self._tamper_error is not None:
-            raise self._tamper_error
-
-    def _mark_store_tampered_locked(self, detail: str) -> None:
-        if self._tamper_error is None:
-            self._tamper_error = VoiceStoreTamperedError(
-                "custom voice store is tampered; "
-                f"custom voice functionality is disabled: {detail}"
-            )
-        raise self._tamper_error
-
-
-async def spool_request_voice_stream(
-    chunks: AsyncIterator[bytes],
-    *,
-    spool_dir: Path,
-) -> OwnedVoiceUpload:
-    """Copy one async voice-upload stream into Trillim-owned temp storage."""
-    fd, temp_path = _create_owned_temp_file(spool_dir)
-    total = 0
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            async for chunk in chunks:
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > MAX_VOICE_UPLOAD_BYTES:
-                    raise PayloadTooLargeError(
-                        f"voice upload exceeds the {MAX_VOICE_UPLOAD_BYTES} byte limit"
-                    )
-                handle.write(chunk)
-        if total <= 0:
-            raise InvalidRequestError("audio must not be empty")
-        return OwnedVoiceUpload(path=temp_path, size_bytes=total)
-    except BaseException:
+            _write_manifest(root, next_manifest)
+        except Exception:
+            unlink_if_exists(final_path)
+            raise
+    except Exception:
         unlink_if_exists(temp_path)
         raise
+    return normalized_name, loaded_state
+
+
+async def delete_custom_voice(root: Path, *, name: str) -> str:
+    """Best-effort delete one custom voice from disk and manifest."""
+    normalized_name = normalize_required_name(name, field_name="name")
+    manifest = _load_manifest(root, built_ins=set())
+    entry = manifest.get(normalized_name)
+    if entry is None:
+        return normalized_name
+    state_path = _state_path(root, entry.storage_id)
+    _raise_if_symlink_for_write(state_path)
+    next_manifest = dict(manifest)
+    del next_manifest[normalized_name]
+    _write_manifest(root, next_manifest)
+    unlink_if_exists(state_path)
+    return normalized_name
+
+
+def _load_manifest(root: Path, *, built_ins: set[str]) -> dict[str, ManagedVoiceEntry]:
+    root = Path(root)
+    manifest_path = root / VOICE_MANIFEST_NAME
+    if not root.exists():
+        return {}
+    if _warn_if_symlink(root, "voice store root uses a symlink"):
+        return {}
+    if not root.is_dir():
+        logger.warning("Skipping custom TTS voices: voice store root is malformed")
+        return {}
+    if not manifest_path.exists():
+        _warn_for_legacy_files(root)
+        if _has_non_legacy_children(root):
+            logger.warning("Skipping custom TTS voices: voice manifest is missing")
+        return {}
+    if _warn_if_symlink(manifest_path, "voice manifest uses a symlink"):
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        logger.warning("Skipping custom TTS voices: voice manifest is malformed")
+        return {}
+    if not isinstance(payload, dict):
+        logger.warning("Skipping custom TTS voices: voice manifest is malformed")
+        return {}
+    entries = payload.get("voices")
+    if not isinstance(entries, list):
+        logger.warning("Skipping custom TTS voices: voice manifest is malformed")
+        return {}
+    manifest: dict[str, ManagedVoiceEntry] = {}
+    for item in entries:
+        entry = _load_manifest_entry(item)
+        if entry is None:
+            continue
+        if entry.name in manifest or entry.name in built_ins:
+            logger.warning("Skipping malformed custom TTS voice manifest entry")
+            continue
+        manifest[entry.name] = entry
+    _warn_for_inventory_mismatch(root, manifest)
+    return manifest
+
+
+def _write_manifest(root: Path, manifest: dict[str, ManagedVoiceEntry]) -> None:
+    _ensure_store_root(root)
+    manifest_path = root / VOICE_MANIFEST_NAME
+    _raise_if_symlink_for_write(manifest_path)
+    payload = {
+        "voices": [
+            {
+                "name": entry.name,
+                "storage_id": entry.storage_id,
+                "size_bytes": entry.size_bytes,
+            }
+            for entry in sorted(manifest.values(), key=lambda item: item.name)
+        ]
+    }
+    atomic_write_bytes(
+        manifest_path,
+        json.dumps(payload, sort_keys=True, indent=2).encode("utf-8"),
+    )
+
+
+def _load_optional_state(entry: ManagedVoiceEntry, state_path: Path) -> dict | None:
+    if _warn_if_symlink(state_path, f"voice file for {entry.name!r} uses a symlink"):
+        return None
+    try:
+        stat_result = state_path.stat()
+    except FileNotFoundError:
+        _warn_skip(entry.name, "voice file is missing")
+        return None
+    except OSError:
+        _warn_skip(entry.name, "voice file could not be read")
+        return None
+    if not state_path.is_file():
+        _warn_skip(entry.name, "voice file is not a regular file")
+        return None
+    if stat_result.st_size != entry.size_bytes:
+        _warn_skip(entry.name, "voice file size does not match manifest")
+        return None
+    try:
+        return load_safe_voice_state_safetensors(state_path)
+    except InvalidRequestError:
+        _warn_skip(entry.name, "voice file is not valid safetensors")
+        return None
+
+
+def _load_manifest_entry(item: object) -> ManagedVoiceEntry | None:
+    if not isinstance(item, dict):
+        logger.warning("Skipping malformed custom TTS voice manifest entry")
+        return None
+    try:
+        name = item["name"]
+        storage_id = item["storage_id"]
+        size_bytes = item["size_bytes"]
+    except KeyError:
+        logger.warning("Skipping malformed custom TTS voice manifest entry")
+        return None
+    try:
+        normalized_name = normalize_optional_name(name, field_name="name")
+    except InvalidRequestError:
+        logger.warning("Skipping malformed custom TTS voice manifest entry")
+        return None
+    if (
+        not isinstance(name, str)
+        or not name
+        or normalized_name != name
+        or not isinstance(storage_id, str)
+        or not isinstance(size_bytes, int)
+    ):
+        logger.warning("Skipping malformed custom TTS voice manifest entry")
+        return None
+    if size_bytes <= 0 or size_bytes > MAX_VOICE_STATE_BYTES:
+        logger.warning("Skipping malformed custom TTS voice manifest entry")
+        return None
+    if storage_id != _storage_id_for_name(name):
+        logger.warning("Skipping malformed custom TTS voice manifest entry")
+        return None
+    return ManagedVoiceEntry(name=name, storage_id=storage_id, size_bytes=size_bytes)
+
+
+def _warn_for_inventory_mismatch(
+    root: Path,
+    manifest: dict[str, ManagedVoiceEntry],
+) -> None:
+    expected_names = {VOICE_MANIFEST_NAME}
+    expected_names.update(
+        f"{entry.storage_id}{VOICE_STATE_SUFFIX}" for entry in manifest.values()
+    )
+    unexpected: list[str] = []
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        logger.warning("Skipping custom TTS voice inventory check: voice store root is malformed")
+        return
+    for child in children:
+        if _warn_if_symlink(child, "voice store child uses a symlink"):
+            continue
+        if child.name in expected_names:
+            continue
+        if child.name.endswith(LEGACY_VOICE_STATE_SUFFIX):
+            logger.warning("Skipping legacy TTS voice file: %s", child)
+            continue
+        unexpected.append(child.name)
+    if unexpected:
+        logger.warning(
+            "Skipping unexpected TTS voice store files: %s",
+            ", ".join(sorted(repr(name) for name in unexpected)),
+        )
+
+
+def _warn_for_legacy_files(root: Path) -> None:
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        logger.warning("Skipping custom TTS voices: voice store root is malformed")
+        return
+    for child in children:
+        if _warn_if_symlink(child, "voice store child uses a symlink"):
+            continue
+        if child.name.endswith(LEGACY_VOICE_STATE_SUFFIX):
+            logger.warning("Skipping legacy TTS voice file: %s", child)
+
+
+def _has_non_legacy_children(root: Path) -> bool:
+    try:
+        return any(
+            child.name != VOICE_MANIFEST_NAME
+            and not child.name.endswith(LEGACY_VOICE_STATE_SUFFIX)
+            for child in root.iterdir()
+        )
+    except OSError:
+        logger.warning("Skipping custom TTS voices: voice store root is malformed")
+        return False
+
+
+def _ensure_store_root(root: Path) -> None:
+    if root.exists():
+        _raise_if_symlink_for_write(root)
+        if not root.is_dir():
+            raise VoiceStoreTamperedError("voice store root is malformed")
+    root.mkdir(parents=True, exist_ok=True)
+
+
+def _state_path(root: Path, storage_id: str) -> Path:
+    return root / f"{storage_id}{VOICE_STATE_SUFFIX}"
+
+
+def _create_temp_state_path(root: Path) -> Path:
+    _ensure_store_root(root)
+    fd, temp_name = tempfile.mkstemp(
+        dir=root,
+        prefix="voice-",
+        suffix=VOICE_STATE_SUFFIX,
+    )
+    os.close(fd)
+    return Path(temp_name)
+
+
+def _warn_if_symlink(path: Path, reason: str) -> bool:
+    if path.is_symlink():
+        logger.warning("Skipping custom TTS voice store path %s: %s", path, reason)
+        return True
+    return False
+
+
+def _raise_if_symlink_for_write(path: Path) -> None:
+    if path.is_symlink():
+        raise VoiceStoreTamperedError("voice store must not use symlinks")
+
+
+def _warn_skip(voice_name: str, reason: str) -> None:
+    logger.warning("Skipping custom TTS voice %r: %s", voice_name, reason)
 
 
 async def spool_voice_bytes(
@@ -443,22 +389,6 @@ async def copy_source_audio(
     source_path = validate_source_audio_path(path)
     source_fd = open_validated_source_audio_file(source_path)
     return await asyncio.to_thread(_copy_source_audio_sync, source_fd, spool_dir)
-
-
-async def spool_voice_state_bytes(
-    state_bytes: bytes,
-    *,
-    spool_dir: Path,
-) -> Path:
-    """Write one serialized custom-voice state into session-owned temp storage."""
-    fd, temp_path = _create_owned_temp_file(spool_dir, suffix=".state")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(state_bytes)
-        return temp_path
-    except BaseException:
-        unlink_if_exists(temp_path)
-        raise
 
 
 def _copy_source_audio_sync(source_fd: int, spool_dir: Path) -> OwnedVoiceUpload:

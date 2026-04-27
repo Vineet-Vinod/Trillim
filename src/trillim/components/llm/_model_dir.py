@@ -56,6 +56,8 @@ _MAX_REMOTE_CODE_BYTES = 4 * 1024 * 1024
 _SUPPORTED_ADAPTER_FORMAT_VERSION = CURRENT_FORMAT_VERSION
 
 
+# Model metadata extraction
+
 @dataclass(frozen=True, slots=True)
 class _ArchitectureInfo:
     arch_type: ArchitectureType
@@ -106,6 +108,8 @@ _ACTIVATION_MAP = {
 }
 
 
+# Public runtime API
+
 @dataclass(slots=True)
 class RuntimeFiles:
     """Validated runtime paths and optional overlay state."""
@@ -121,15 +125,6 @@ class RuntimeFiles:
             return
         self._temp_dir.cleanup()
         self._temp_dir = None
-
-
-@dataclass(frozen=True, slots=True)
-class _OverlayMetadata:
-    config: dict
-    added_tokens: dict | list | None
-    generation_config: dict | None
-    special_tokens_map: dict | None
-    tokenizer_config: dict | None
 
 
 def validate_model_dir(
@@ -206,7 +201,6 @@ def validate_lora_dir(
     _validate_adapter_metadata(path, adapter_config=adapter_config)
     if model_dir is not None:
         _validate_adapter_compatibility(
-            path,
             adapter_config=adapter_config,
             model_dir=Path(model_dir),
         )
@@ -249,12 +243,16 @@ def prepare_runtime_files(
     )
 
 
+# Shared JSON and filesystem helpers
+
 def _load_json(path: Path) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ModelValidationError(f"Could not read JSON from {path}") from exc
 
+
+# Bundle and adapter validation
 
 def _validate_model_bundle_metadata(model_dir: Path) -> dict:
     config_path = model_dir / "trillim_config.json"
@@ -345,8 +343,6 @@ def _validate_adapter_metadata(
 
 
 def _validate_adapter_compatibility(
-    adapter_dir: Path,
-    *,
     adapter_config: dict,
     model_dir: Path,
 ) -> None:
@@ -368,6 +364,8 @@ def _validate_adapter_compatibility(
             f"Adapter/model mismatch: {detail}"
         )
 
+
+# Model config extraction
 
 def _extract_dimensions(config: dict) -> dict[str, int]:
     hidden_dim = _require_positive_int(config.get("hidden_size"), "hidden_size")
@@ -513,6 +511,17 @@ def _raise_if_symlink(path: Path, message: str) -> None:
         raise ModelValidationError(f"{message}: {path}")
 
 
+# LoRA overlay construction
+
+@dataclass(frozen=True, slots=True)
+class _OverlayMetadata:
+    config: dict
+    added_tokens: dict | list | None
+    generation_config: dict | None
+    special_tokens_map: dict | None
+    tokenizer_config: dict | None
+
+
 def _build_overlay_dir(
     overlay_dir: Path,
     *,
@@ -562,21 +571,21 @@ def _build_overlay_dir(
 
 
 def _build_overlay_metadata(model_dir: Path, adapter_dir: Path) -> _OverlayMetadata:
-    base_config = _load_required_json_strict(
+    base_config = _load_required_json_or_raise(
         model_dir / "config.json",
         symlink_message="Model bundle must not use symlinks",
         transform=_canonicalize_model_config,
     )
-    adapter_config = _load_optional_json_strict(
+    adapter_config = _load_optional_json_or_raise(
         adapter_dir / "config.json",
         symlink_message="LoRA directory must not use symlinks",
         transform=_canonicalize_model_config,
     )
-    base_tokenizer_config = _load_optional_json_strict(
+    base_tokenizer_config = _load_optional_json_or_raise(
         model_dir / "tokenizer_config.json",
         symlink_message="Model bundle must not use symlinks",
     )
-    adapter_tokenizer_config = _load_optional_json_strict(
+    adapter_tokenizer_config = _load_optional_json_or_raise(
         adapter_dir / "tokenizer_config.json",
         symlink_message="LoRA directory must not use symlinks",
     )
@@ -592,31 +601,31 @@ def _build_overlay_metadata(model_dir: Path, adapter_dir: Path) -> _OverlayMetad
         )
         or {},
         added_tokens=_merge_json_payloads(
-            _load_optional_json_strict(
+            _load_optional_json_or_raise(
                 model_dir / "added_tokens.json",
                 symlink_message="Model bundle must not use symlinks",
             ),
-            _load_optional_json_strict(
+            _load_optional_json_or_raise(
                 adapter_dir / "added_tokens.json",
                 symlink_message="LoRA directory must not use symlinks",
             ),
         ),
         generation_config=_merge_json_payloads(
-            _load_optional_json_with_message(
+            _load_optional_json_lenient(
                 model_dir / "generation_config.json",
                 symlink_message="Model bundle must not use symlinks",
             ),
-            _load_optional_json_with_message(
+            _load_optional_json_lenient(
                 adapter_dir / "generation_config.json",
                 symlink_message="LoRA directory must not use symlinks",
             ),
         ),
         special_tokens_map=_merge_json_payloads(
-            _load_optional_json_strict(
+            _load_optional_json_or_raise(
                 model_dir / "special_tokens_map.json",
                 symlink_message="Model bundle must not use symlinks",
             ),
-            _load_optional_json_strict(
+            _load_optional_json_or_raise(
                 adapter_dir / "special_tokens_map.json",
                 symlink_message="LoRA directory must not use symlinks",
             ),
@@ -746,6 +755,8 @@ def _merge_json_payloads(base: dict | list | None, override: dict | list | None)
     return merged
 
 
+# Tokenizer loader metadata merging
+
 def _adapter_declares_auto_tokenizer(*payloads: dict | None) -> bool:
     return any(_extract_auto_map_refs(payload, key="AutoTokenizer") for payload in payloads)
 
@@ -764,6 +775,9 @@ def _merge_tokenizer_loader_payloads(
 
 
 def _restore_base_tokenizer_loader_fields(merged: dict, base: dict | None) -> None:
+    # Adapter metadata often carries copied/implicit tokenizer loader fields.
+    # Unless the adapter explicitly declares AutoTokenizer, keep loader class
+    # selection anchored to the base bundle to avoid importing unintended code.
     tokenizer_class = None
     if isinstance(base, dict):
         candidate = base.get("tokenizer_class")
@@ -835,11 +849,15 @@ def _extract_auto_map_value(
     return value, True, False
 
 
+# Remote-code overlay collection
+
 def _collect_remote_code_files(
     model_dir: Path,
     adapter_dir: Path,
     metadata: _OverlayMetadata,
 ) -> list[Path]:
+    # Copy only local remote-code modules referenced by tokenizer/config
+    # metadata, then walk simple same-directory relative imports.
     queue = deque(
         (_parse_remote_code_module_path(class_ref), 0)
         for class_ref in _collect_remote_code_class_refs(metadata)
@@ -994,7 +1012,7 @@ def _resolve_relative_import_module_path(
     return relative_module_path
 
 
-def _load_optional_json_with_message(
+def _load_optional_json_lenient(
     path: Path,
     *,
     symlink_message: str,
@@ -1008,7 +1026,7 @@ def _load_optional_json_with_message(
         return None
 
 
-def _load_optional_json_strict(
+def _load_optional_json_or_raise(
     path: Path,
     *,
     symlink_message: str,
@@ -1021,7 +1039,7 @@ def _load_optional_json_strict(
     return payload if transform is None else transform(payload)
 
 
-def _load_required_json_strict(
+def _load_required_json_or_raise(
     path: Path,
     *,
     symlink_message: str,

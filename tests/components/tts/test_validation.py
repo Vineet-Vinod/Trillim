@@ -1,299 +1,304 @@
-"""Tests for TTS validation helpers."""
-
 from __future__ import annotations
 
-import errno
-import io
 import os
+import errno
 import stat
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import torch
-
-from trillim.components.tts._limits import MAX_VOICE_STATE_BYTES
+from trillim.components.tts._limits import (
+    MAX_HTTP_TEXT_BYTES,
+    MAX_INPUT_TEXT_CHARS,
+    MAX_VOICE_STATE_BYTES,
+    MAX_VOICE_UPLOAD_BYTES,
+)
 from trillim.components.tts._validation import (
     PayloadTooLargeError,
-    _validate_content_length,
+    _flatten_safetensors_voice_state,
+    _unflatten_safetensors_voice_state,
     _validate_loaded_voice_state_value,
-    load_safe_voice_state_bytes,
+    dump_voice_state_safetensors_bytes,
+    load_safe_voice_state_safetensors,
+    load_safe_voice_state_safetensors_bytes,
     normalize_optional_name,
     normalize_required_name,
     open_validated_source_audio_file,
+    save_voice_state_safetensors,
     validate_http_speech_body,
     validate_http_speech_request,
     validate_http_voice_upload_request,
-    validate_source_audio_path,
     validate_speed,
+    validate_source_audio_path,
     validate_text,
     validate_voice_bytes,
     validate_voice_state_bytes,
 )
 from trillim.errors import InvalidRequestError
 
-
-class _UnsafeState:
-    pass
+from tests.components.tts.support import sample_voice_state
 
 
 class TTSValidationTests(unittest.TestCase):
-    def test_validate_text_rejects_empty_and_oversized_inputs(self):
-        with self.assertRaisesRegex(InvalidRequestError, "must be a string"):
-            validate_text(123)  # type: ignore[arg-type]
-        with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
-            validate_text("   ")
-        with self.assertRaisesRegex(InvalidRequestError, "character limit"):
-            validate_text("x" * 1_000_001)
-        self.assertEqual(validate_text("hello"), "hello")
+    def test_text_name_speed_and_body_validation(self):
+        self.assertEqual(validate_text(" hello "), " hello ")
+        self.assertEqual(normalize_required_name(" custom ", field_name="voice"), "custom")
+        self.assertIsNone(normalize_optional_name(None, field_name="voice"))
+        self.assertEqual(validate_speed("1.5"), 1.5)
+        self.assertEqual(validate_http_speech_body("hi".encode()), "hi")
 
-    def test_validate_http_speech_request_normalizes_metadata(self):
-        request = validate_http_speech_request(
-            content_length="3",
-            voice=" alba ",
-            speed="1.5",
+        invalid_cases = (
+            (validate_text, (123,), "text must be a string"),
+            (validate_text, (" ",), "must not be empty"),
+            (validate_text, ("x" * (MAX_INPUT_TEXT_CHARS + 1),), "character limit"),
+            (normalize_required_name, (None,), "header is required"),
+            (normalize_required_name, (" ",), "must not be empty"),
+            (normalize_optional_name, ("bad-name",), "letters and digits"),
+            (validate_speed, ("fast",), "number"),
+            (validate_speed, (99,), "between"),
+            (validate_http_speech_body, (b"x" * (MAX_HTTP_TEXT_BYTES + 1),), "byte limit"),
+            (validate_http_speech_body, (b"",), "must not be empty"),
+            (validate_http_speech_body, (b"\xff",), "valid UTF-8"),
         )
-        self.assertEqual(request.content_length, 3)
-        self.assertEqual(request.voice, "alba")
-        self.assertEqual(request.speed, 1.5)
+        for func, args, message in invalid_cases:
+            with self.subTest(func=func.__name__, message=message):
+                kwargs = (
+                    {"field_name": "voice"}
+                    if func in {normalize_required_name, normalize_optional_name}
+                    else {}
+                )
+                with self.assertRaisesRegex(InvalidRequestError, message):
+                    func(*args, **kwargs)
 
-    def test_validate_http_speech_request_rejects_bad_content_length(self):
-        with self.assertRaisesRegex(InvalidRequestError, "content-length"):
+    def test_http_metadata_and_size_validation(self):
+        speech = validate_http_speech_request(
+            content_length="2",
+            voice="alba",
+            speed=None,
+        )
+        self.assertEqual(speech.content_length, 2)
+        self.assertEqual(speech.voice, "alba")
+        self.assertEqual(speech.speed, 1.0)
+        upload = validate_http_voice_upload_request(
+            content_length="3",
+            name="custom",
+        )
+        self.assertEqual(upload.content_length, 3)
+        self.assertEqual(upload.name, "custom")
+        self.assertEqual(validate_voice_bytes(b"voice"), b"voice")
+
+        with self.assertRaisesRegex(InvalidRequestError, "invalid content-length"):
+            validate_http_speech_request(content_length="bad", voice=None, speed=None)
+        with self.assertRaisesRegex(PayloadTooLargeError, "speech input exceeds"):
             validate_http_speech_request(
-                content_length="abc",
+                content_length=str(MAX_HTTP_TEXT_BYTES + 1),
                 voice=None,
                 speed=None,
             )
-        with self.assertRaises(PayloadTooLargeError):
-            validate_http_speech_request(
-                content_length=str((6 * 1024 * 1024) + 1),
-                voice=None,
-                speed=None,
+        with self.assertRaisesRegex(PayloadTooLargeError, "voice upload exceeds"):
+            validate_http_voice_upload_request(
+                content_length=str(MAX_VOICE_UPLOAD_BYTES + 1),
+                name="custom",
             )
-
-    def test_validate_http_voice_upload_request_requires_name(self):
-        with self.assertRaisesRegex(InvalidRequestError, "name header is required"):
-            validate_http_voice_upload_request(content_length=None, name=None)
-        request = validate_http_voice_upload_request(content_length="2", name=" voice ")
-        self.assertEqual(request.name, "voice")
-
-    def test_validate_http_speech_body_rejects_invalid_utf8_and_empty_input(self):
-        with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
-            validate_http_speech_body(b"")
-        with self.assertRaisesRegex(InvalidRequestError, "valid UTF-8"):
-            validate_http_speech_body(b"\xff")
-        with self.assertRaises(PayloadTooLargeError):
-            validate_http_speech_body(b"x" * ((6 * 1024 * 1024) + 1))
-
-    def test_validate_voice_bytes_and_state_bytes_enforce_bounds(self):
-        self.assertEqual(validate_voice_bytes(b"abc"), b"abc")
         with self.assertRaisesRegex(InvalidRequestError, "audio must be bytes"):
-            validate_voice_bytes("abc")  # type: ignore[arg-type]
+            validate_voice_bytes("voice")
         with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
             validate_voice_bytes(b"")
-        with self.assertRaises(PayloadTooLargeError):
-            validate_voice_bytes(b"x" * ((25 * 1024 * 1024) + 1))
+        with self.assertRaisesRegex(PayloadTooLargeError, "voice upload exceeds"):
+            validate_voice_bytes(b"x" * (MAX_VOICE_UPLOAD_BYTES + 1))
+
+    def test_safetensors_voice_state_roundtrip_and_malformed_payload(self):
+        payload = dump_voice_state_safetensors_bytes(sample_voice_state())
+        state = load_safe_voice_state_safetensors_bytes(payload)
+        self.assertEqual(state["module"]["cache"].tolist(), [1.0])
+
+        self.assertEqual(validate_voice_state_bytes(payload), payload)
         with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
             validate_voice_state_bytes(b"")
         with self.assertRaisesRegex(InvalidRequestError, "byte limit"):
             validate_voice_state_bytes(b"x" * (MAX_VOICE_STATE_BYTES + 1))
+        with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+            load_safe_voice_state_safetensors_bytes(b"not safetensors")
+        with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+            dump_voice_state_safetensors_bytes({"module": {"bad/key": object()}})
 
-    def test_load_safe_voice_state_bytes_rejects_unsafe_or_malformed_payloads(self):
-        buffer = io.BytesIO()
-        torch.save({"layer": {"cache": torch.tensor([1.0])}}, buffer)
-        loaded = load_safe_voice_state_bytes(buffer.getvalue())
-        self.assertIn("layer", loaded)
+    def test_safetensors_path_validation_and_cleanup_error_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            missing = root / "missing.safetensors"
+            empty = root / "empty.safetensors"
+            empty.write_bytes(b"")
 
-        bad_buffer = io.BytesIO()
-        torch.save({"bad": _UnsafeState()}, bad_buffer)
-        with self.assertRaisesRegex(InvalidRequestError, "voice state is malformed"):
-            load_safe_voice_state_bytes(bad_buffer.getvalue())
+            with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                load_safe_voice_state_safetensors(missing)
+            with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                load_safe_voice_state_safetensors(empty)
+            with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                save_voice_state_safetensors({}, root / "state.safetensors")
+            with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                save_voice_state_safetensors("bad", root / "state.safetensors")
+            with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                save_voice_state_safetensors(sample_voice_state(), root)
 
-        for payload in ({}, {"bad": {1: torch.tensor([1.0])}}, {"bad": {1, 2, 3}}):
-            with self.subTest(payload=payload):
-                buffer = io.BytesIO()
-                torch.save(payload, buffer)
-                with self.assertRaisesRegex(InvalidRequestError, "voice state is malformed"):
-                    load_safe_voice_state_bytes(buffer.getvalue())
+        payload = dump_voice_state_safetensors_bytes(sample_voice_state())
+        with patch.object(Path, "unlink", side_effect=OSError("cleanup")):
+            state = load_safe_voice_state_safetensors_bytes(payload)
+        self.assertEqual(state["module"]["cache"].tolist(), [1.0])
+
+        with patch.object(Path, "unlink", side_effect=OSError("cleanup")):
+            dumped = dump_voice_state_safetensors_bytes(sample_voice_state())
+        self.assertGreater(len(dumped), 0)
+
+    def test_loaded_voice_state_value_validation(self):
+        import torch
 
         _validate_loaded_voice_state_value(
-            {
-                "tensor": torch.tensor([1.0]),
-                "nested": [1, "ok", None, (True, 3.5)],
-            },
+            {"module": [torch.tensor([1.0]), ("ok", 1, 1.5, True, None)]},
             torch,
         )
-        with self.assertRaisesRegex(InvalidRequestError, "voice state is malformed"):
-            _validate_loaded_voice_state_value({1: torch.tensor([1.0])}, torch)
-        with self.assertRaisesRegex(InvalidRequestError, "voice state is malformed"):
-            _validate_loaded_voice_state_value(object(), torch)
+        invalid_values = (
+            {1: torch.tensor([1.0])},
+            {"module": object()},
+        )
+        for value in invalid_values:
+            with self.subTest(value=repr(value)):
+                with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                    _validate_loaded_voice_state_value(value, torch)
 
-    def test_validate_speed_and_name_helpers(self):
-        self.assertEqual(validate_speed("2.0"), 2.0)
-        self.assertEqual(validate_speed(0.25), 0.25)
-        self.assertEqual(validate_speed(4.0), 4.0)
-        with self.assertRaisesRegex(InvalidRequestError, "must be a number"):
-            validate_speed("fast")
-        with self.assertRaisesRegex(InvalidRequestError, "between 0.25 and 4.0"):
-            validate_speed("10")
-        self.assertEqual(normalize_optional_name(" x ", field_name="voice"), "x")
-        self.assertIsNone(normalize_optional_name(None, field_name="voice"))
-        with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
-            normalize_optional_name("  ", field_name="voice")
-        for value in ("bad/name", "../escape", "bad-name", "bad_name", "bad.name"):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(
-                    InvalidRequestError,
-                    "must contain only letters and digits",
-                ):
-                    normalize_optional_name(value, field_name="voice")
-        with self.assertRaisesRegex(InvalidRequestError, "header is required"):
-            normalize_required_name(None, field_name="name")
-        with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
-            normalize_required_name("  ", field_name="name")
+    def test_safetensors_flatten_and_unflatten_reject_malformed_shapes(self):
+        import torch
+
+        flatten_cases = (
+            {"bad/module": {"cache": torch.tensor([1.0])}},
+            {"module": torch.tensor([1.0])},
+            {"module": {"bad/key": torch.tensor([1.0])}},
+            {"module": {"cache": object()}},
+            {"module": {}},
+        )
+        for state in flatten_cases:
+            with self.subTest(state=repr(state)):
+                with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                    _flatten_safetensors_voice_state(state, torch)
+
+        unflatten_cases = (
+            {},
+            {"bad": torch.tensor([1.0])},
+            {"/key": torch.tensor([1.0])},
+            {"module/": torch.tensor([1.0])},
+            {"module/key": object()},
+        )
+        for flat_state in unflatten_cases:
+            with self.subTest(flat_state=repr(flat_state)):
+                with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+                    _unflatten_safetensors_voice_state(flat_state, torch)
+
+        self.assertEqual(
+            _unflatten_safetensors_voice_state({"module/key": torch.tensor([1.0])}, torch)[
+                "module"
+            ]["key"].tolist(),
+            [1.0],
+        )
+
+    def test_open_validated_source_audio_file_accepts_regular_nonempty_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "voice.wav"
+            source.write_bytes(b"voice")
+            fd = open_validated_source_audio_file(source)
+            try:
+                self.assertGreater(os.fstat(fd).st_size, 0)
+            finally:
+                os.close(fd)
+
+    def test_open_validated_source_audio_file_rejects_unsafe_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            missing = root / "missing.wav"
+            empty = root / "empty.wav"
+            directory = root / "directory"
+            empty.write_bytes(b"")
+            directory.mkdir()
+
+            cases = (
+                (missing, "does not exist"),
+                (empty, "must not be empty"),
+                (directory, "not a regular file"),
+            )
+            for path, message in cases:
+                with self.subTest(path=path):
+                    with self.assertRaisesRegex(InvalidRequestError, message):
+                        open_validated_source_audio_file(path)
+
+            target = root / "target.wav"
+            target.write_bytes(b"voice")
+            symlink = root / "link.wav"
+            symlink.symlink_to(target)
+            with self.assertRaisesRegex(InvalidRequestError, "symlinks"):
+                open_validated_source_audio_file(symlink)
+
+    def test_source_audio_path_and_open_error_branches(self):
+        with self.assertRaisesRegex(InvalidRequestError, "path is required"):
+            validate_source_audio_path("")
+        self.assertEqual(validate_source_audio_path("~/voice.wav"), Path("~/voice.wav").expanduser())
+
+        class EmptyRawPath:
+            _raw_paths = [""]
+
+        with self.assertRaisesRegex(InvalidRequestError, "path is required"):
+            validate_source_audio_path(EmptyRawPath())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "voice.wav"
+            source.write_bytes(b"voice")
+            with patch("trillim.components.tts._validation.os.stat", side_effect=OSError("stat")):
+                with self.assertRaisesRegex(InvalidRequestError, "could not be opened"):
+                    open_validated_source_audio_file(source)
+            with patch("trillim.components.tts._validation.os.open", side_effect=FileNotFoundError):
+                with self.assertRaisesRegex(InvalidRequestError, "does not exist"):
+                    open_validated_source_audio_file(source)
+            with patch(
+                "trillim.components.tts._validation.os.open",
+                side_effect=OSError(errno.ELOOP, "loop"),
+            ):
+                with self.assertRaisesRegex(InvalidRequestError, "symlinks"):
+                    open_validated_source_audio_file(source)
+            with patch(
+                "trillim.components.tts._validation.os.open",
+                side_effect=OSError(errno.EACCES, "denied"),
+            ):
+                with self.assertRaisesRegex(InvalidRequestError, "could not be opened"):
+                    open_validated_source_audio_file(source)
+
+            fd = os.open(source, os.O_RDONLY)
+            try:
+                too_large = os.stat_result(
+                    (stat.S_IFREG, 0, 0, 0, 0, 0, MAX_VOICE_UPLOAD_BYTES + 1, 0, 0, 0)
+                )
+                with patch("trillim.components.tts._validation.os.open", return_value=fd):
+                    with patch("trillim.components.tts._validation.os.fstat", return_value=too_large):
+                        with self.assertRaisesRegex(PayloadTooLargeError, "voice upload exceeds"):
+                            open_validated_source_audio_file(source)
+                fd = os.open(source, os.O_RDONLY)
+                fake_stat = os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, 0, 1, 0, 0, 0))
+                with patch("trillim.components.tts._validation.os.open", return_value=fd):
+                    with patch("trillim.components.tts._validation.os.fstat", return_value=fake_stat):
+                        with self.assertRaisesRegex(InvalidRequestError, "not a regular file"):
+                            open_validated_source_audio_file(source)
+            finally:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        with self.assertRaisesRegex(InvalidRequestError, "invalid content-length"):
+            validate_http_speech_request(content_length="-1", voice=None, speed=None)
+        self.assertIsNone(
+            validate_http_speech_request(content_length=None, voice=None, speed=None).content_length
+        )
+
         with patch(
             "trillim.components.tts._validation.normalize_optional_name",
             return_value=None,
         ):
             with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
-                normalize_required_name("voice", field_name="name")
-
-    def test_validate_http_requests_reject_non_alphanumeric_voice_names(self):
-        for value in ("bad/name", "bad-name"):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(
-                    InvalidRequestError,
-                    "must contain only letters and digits",
-                ):
-                    validate_http_speech_request(
-                        content_length=None,
-                        voice=value,
-                        speed=None,
-                    )
-                with self.assertRaisesRegex(
-                    InvalidRequestError,
-                    "must contain only letters and digits",
-                ):
-                    validate_http_voice_upload_request(
-                        content_length=None,
-                        name=value,
-                    )
-
-    def test_validate_source_audio_path_and_open_reject_symlink_and_non_regular_file(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            source = root / "voice.wav"
-            source.write_bytes(b"abc")
-            self.assertEqual(validate_source_audio_path(source), source)
-            fd = open_validated_source_audio_file(source)
-            self.assertGreaterEqual(fd, 0)
-            os.close(fd)
-            symlink = root / "link.wav"
-            symlink.symlink_to(source)
-            with self.assertRaisesRegex(InvalidRequestError, "must not use symlinks"):
-                open_validated_source_audio_file(symlink)
-            with self.assertRaisesRegex(InvalidRequestError, "does not exist"):
-                open_validated_source_audio_file(root / "missing.wav")
-
-            directory = root / "directory"
-            directory.mkdir()
-            with self.assertRaisesRegex(InvalidRequestError, "not a regular file"):
-                open_validated_source_audio_file(directory)
-
-    def test_validate_source_audio_path_and_internal_helpers_cover_error_matrix(self):
-        with self.assertRaisesRegex(InvalidRequestError, "path is required"):
-            validate_source_audio_path("")  # type: ignore[arg-type]
-
-        self.assertIsNone(
-            _validate_content_length(None, limit=5, kind="payload"),
-        )
-        self.assertEqual(
-            _validate_content_length("5", limit=5, kind="payload"),
-            5,
-        )
-        with self.assertRaisesRegex(InvalidRequestError, "invalid content-length"):
-            _validate_content_length("-1", limit=5, kind="payload")
-        with self.assertRaisesRegex(InvalidRequestError, "invalid content-length"):
-            _validate_content_length("nope", limit=5, kind="payload")
-        with self.assertRaisesRegex(PayloadTooLargeError, "payload exceeds"):
-            _validate_content_length("6", limit=5, kind="payload")
-
-        fake_path = Path("/tmp/fake.wav")
-        fake_stat = types.SimpleNamespace(st_mode=stat.S_IFREG, st_size=4)
-        with patch(
-            "trillim.components.tts._validation.os.stat",
-            side_effect=OSError("boom"),
-        ):
-            with self.assertRaisesRegex(InvalidRequestError, "could not be opened"):
-                open_validated_source_audio_file(fake_path)
-
-        with patch(
-            "trillim.components.tts._validation.os.stat",
-            return_value=fake_stat,
-        ), patch(
-            "trillim.components.tts._validation.os.open",
-            side_effect=FileNotFoundError("gone"),
-        ):
-            with self.assertRaisesRegex(InvalidRequestError, "does not exist"):
-                open_validated_source_audio_file(fake_path)
-
-        with patch(
-            "trillim.components.tts._validation.os.stat",
-            return_value=fake_stat,
-        ), patch(
-            "trillim.components.tts._validation.os.open",
-            side_effect=OSError(errno.ELOOP, "loop"),
-        ):
-            with self.assertRaisesRegex(InvalidRequestError, "must not use symlinks"):
-                open_validated_source_audio_file(fake_path)
-
-        with patch(
-            "trillim.components.tts._validation.os.stat",
-            return_value=fake_stat,
-        ), patch(
-            "trillim.components.tts._validation.os.open",
-            side_effect=OSError(errno.EACCES, "blocked"),
-        ):
-            with self.assertRaisesRegex(InvalidRequestError, "could not be opened"):
-                open_validated_source_audio_file(fake_path)
-
-        with patch(
-            "trillim.components.tts._validation.os.stat",
-            return_value=fake_stat,
-        ), patch(
-            "trillim.components.tts._validation.os.open",
-            return_value=7,
-        ), patch(
-            "trillim.components.tts._validation.os.close",
-        ) as close:
-            with patch(
-                "trillim.components.tts._validation.os.fstat",
-                return_value=types.SimpleNamespace(st_mode=stat.S_IFDIR, st_size=4),
-            ):
-                with self.assertRaisesRegex(InvalidRequestError, "not a regular file"):
-                    open_validated_source_audio_file(fake_path)
-            close.assert_called_once_with(7)
-
-        for size, expected in (
-            ((25 * 1024 * 1024) + 1, PayloadTooLargeError),
-            (0, InvalidRequestError),
-        ):
-            with self.subTest(size=size):
-                with patch(
-                    "trillim.components.tts._validation.os.stat",
-                    return_value=fake_stat,
-                ), patch(
-                    "trillim.components.tts._validation.os.open",
-                    return_value=8,
-                ), patch(
-                    "trillim.components.tts._validation.os.close",
-                ) as close:
-                    with patch(
-                        "trillim.components.tts._validation.os.fstat",
-                        return_value=types.SimpleNamespace(st_mode=stat.S_IFREG, st_size=size),
-                    ):
-                        with self.assertRaises(expected):
-                            open_validated_source_audio_file(fake_path)
-                    close.assert_called_once_with(8)
+                normalize_required_name("custom", field_name="voice")

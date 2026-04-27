@@ -3,28 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-
-
-@dataclass(frozen=True, slots=True)
-class OwnedAudioInput:
-    """A Trillim-owned normalized audio file."""
-
-    path: Path
-    size_bytes: int
-
-
-@dataclass(frozen=True, slots=True)
-class SourceFileSnapshot:
-    """Best-effort metadata snapshot for a caller-owned source file."""
-
-    size_bytes: int
-    modified_ns: int
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerConfig:
-    """Fixed worker runtime settings for Phase 4."""
+    """Fixed worker runtime settings."""
 
     model_name: str
     device: str

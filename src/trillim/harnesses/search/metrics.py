@@ -11,21 +11,13 @@ class SearchMetrics:
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    cached_tokens: int = 0
-
-    @property
-    def total_tokens(self) -> int:
-        """Return the total tokens attributed to the completed turn."""
-        return self.prompt_tokens + self.completion_tokens
 
     def record_generation(
         self,
         *,
         prompt_tokens: int,
         completion_tokens: int,
-        cached_tokens: int,
     ) -> None:
         """Store authoritative usage for the final request."""
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
-        self.cached_tokens = cached_tokens

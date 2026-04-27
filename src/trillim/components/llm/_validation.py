@@ -28,7 +28,7 @@ class SamplingOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    temperature: float | None = Field(default=None, ge=0.0)
     top_k: int | None = Field(default=None, ge=1, le=200)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     repetition_penalty: float | None = Field(default=None, gt=0.0, le=2.0)
@@ -119,6 +119,8 @@ def validate_chat_request(
         require_user_turn=True,
         allow_empty=False,
     )
+    if request.messages[-1].role != "user":
+        raise InvalidRequestError("the final message must use role 'user'")
     if request.model is not None and request.model != active_model_name:
         raise InvalidRequestError(
             f"Requested model {request.model!r} does not match the active model"
@@ -142,6 +144,14 @@ def validate_swap_request(payload: object) -> SwapModelRequestInput:
 def validate_sampling_options(**kwargs) -> SamplingOptions:
     """Validate SDK sampling kwargs."""
     return _validate_model(SamplingOptions, kwargs)
+
+
+def validate_user_message(content: str) -> str:
+    """Validate text supplied to ChatSession.generate()."""
+    return _validate_model(
+        ChatMessageInput,
+        {"role": "user", "content": content},
+    ).content
 
 
 def validate_messages(

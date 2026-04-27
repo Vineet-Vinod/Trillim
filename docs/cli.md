@@ -129,7 +129,7 @@ Flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--voice` | Add `STT` and `TTS` routes alongside the LLM routes |
+| `--voice` | Add `STT` and `TTS` routes alongside the LLM routes (`/v1/audio/transcriptions` accepts WAV or raw PCM) |
 | `--trust-remote-code` | Allow bundles that reference custom tokenizer or config code |
 
 Important constraints:

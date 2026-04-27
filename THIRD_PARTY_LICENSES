@@ -103,6 +103,13 @@ prompt-toolkit
 
 --------------------------------------------------------------------------------
 
+safetensors
+  License:   Apache License 2.0
+  Copyright: Copyright (c) 2022 Hugging Face
+  URL:       https://github.com/huggingface/safetensors
+
+--------------------------------------------------------------------------------
+
 Jinja2
   License:   BSD 3-Clause License
   Copyright: Copyright 2007 Pallets

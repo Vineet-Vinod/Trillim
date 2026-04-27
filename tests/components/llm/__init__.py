@@ -1,1 +1,1 @@
-"""LLM component test package."""
+"""LLM tests."""

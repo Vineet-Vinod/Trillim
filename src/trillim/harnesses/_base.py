@@ -3,25 +3,24 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from trillim.components.llm._events import ChatEvent, ChatTokenEvent
+from trillim.components.llm._events import ChatEvent
 
 if TYPE_CHECKING:
-    from trillim.components.llm._engine import InferenceEngine
+    from trillim.components.llm.public import LLM, _RuntimeSnapshot
     from trillim.components.llm._session import _ChatSession
 
 
 class _Harness(abc.ABC):
-    """Internal base class for concrete LLM harness implementations."""
+    """Internal base class for session-owned LLM harness implementations."""
 
-    def __init__(self, engine: InferenceEngine) -> None:
-        """Bind the harness to an engine."""
-        self._engine = engine
+    def __init__(self, llm: LLM, runtime: _RuntimeSnapshot) -> None:
+        self._llm = llm
+        self._runtime = runtime
         self._prompt_tokens = 0
         self._completion_tokens = 0
-        self._cached_tokens = 0
 
     @property
     def prompt_tokens(self) -> int:
@@ -30,40 +29,35 @@ class _Harness(abc.ABC):
 
     @property
     def completion_tokens(self) -> int:
-        """Return the number of completion tokens emitted in the last turn."""
+        """Return the completion-token count for the last completed turn."""
         return self._completion_tokens
 
     @property
-    def cached_tokens(self) -> int:
-        """Return the cached-token count reported for the last completed turn."""
-        return self._cached_tokens
-
-    @property
     def tokenizer(self):
-        """Return the engine tokenizer."""
-        return self._engine.tokenizer
+        """Return the runtime tokenizer."""
+        return self._runtime.tokenizer
 
     def _reset_usage(self) -> None:
-        """Reset per-turn usage accounting."""
         self._prompt_tokens = 0
         self._completion_tokens = 0
-        self._cached_tokens = 0
 
-    def _apply_engine_usage(self) -> None:
-        """Copy authoritative usage values from the engine."""
-        self._prompt_tokens = self._engine.last_prompt_tokens
-        self._completion_tokens = self._engine.last_completion_tokens
-        self._cached_tokens = self._engine.last_cache_hit
-
-    async def stream_text(
+    async def _generate_tokens(
         self,
         session: _ChatSession,
+        token_ids: Sequence[int],
         **sampling: Any,
-    ) -> AsyncIterator[str]:
-        """Yield only text fragments from structured harness events."""
-        async for event in self.stream_events(session, **sampling):
-            if isinstance(event, ChatTokenEvent):
-                yield event.text
+    ) -> AsyncIterator[int]:
+        stream = self._llm._generate(
+            self._runtime,
+            session._runtime_epoch,
+            token_ids=token_ids,
+            **sampling,
+        )
+        try:
+            async for token_id in stream:
+                yield token_id
+        finally:
+            await stream.aclose()
 
     @abc.abstractmethod
     async def stream_events(

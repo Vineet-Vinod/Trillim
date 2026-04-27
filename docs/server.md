@@ -39,8 +39,7 @@ trillim serve Trillim/BitNet-TRNQ --voice
 from trillim import LLM, Server
 
 server = Server(
-    LLM("Trillim/BitNet-TRNQ"),
-    allow_hot_swap=True,
+    LLM("Trillim/BitNet-TRNQ", allow_hot_swap=True),
 )
 server.run(host="127.0.0.1", port=8000)
 ```
@@ -49,8 +48,8 @@ server.run(host="127.0.0.1", port=8000)
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/healthz` | `GET` | readiness and component health |
-| `/v1/models` | `GET` | active model metadata |
+| `/healthz` | `GET` | app liveness |
+| `/v1/models` | `GET` | active model ID |
 | `/v1/chat/completions` | `POST` | OpenAI-compatible chat completions |
 | `/v1/models/swap` | `POST` | optional hot-swap route |
 | `/v1/audio/transcriptions` | `POST` | optional STT route |
@@ -63,46 +62,23 @@ There is no `/v1/completions` route in this implementation.
 
 ## `GET /healthz`
 
-Returns `200` when all composed components are healthy:
+Returns `200` when the app is alive:
 
 ```json
 {"status": "ok"}
 ```
 
-If an LLM component is not in the `running` state, the server returns `503` and includes the component state:
-
-```json
-{
-  "status": "degraded",
-  "components": {
-    "llm": {
-      "state": "swapping"
-    }
-  }
-}
-```
-
 ## `GET /v1/models`
 
-Returns truthful metadata for the active runtime:
+Returns the active model ID in OpenAI-style list form:
 
 ```json
 {
   "object": "list",
-  "state": "running",
   "data": [
     {
       "id": "BitNet-TRNQ",
-      "object": "model",
-      "path": "/Users/you/.trillim/models/Trillim/BitNet-TRNQ",
-      "max_context_tokens": 4096,
-      "trust_remote_code": false,
-      "adapter_path": null,
-      "init_config": {
-        "num_threads": 0,
-        "lora_quant": null,
-        "unembed_quant": null
-      }
+      "object": "model"
     }
   ]
 }
@@ -220,6 +196,7 @@ Important behavior:
 - Omitted init-time fields reset to Trillim defaults. They do not inherit the previous runtime's values.
 - The effective search token budget is clamped to one quarter of the active model context window.
 - Existing chat sessions become stale once swap handoff begins.
+- The current implementation stops the old engine before starting the replacement engine. If replacement startup fails, the LLM becomes unavailable until restarted.
 - `search_provider: "brave"` requires `SEARCH_API_KEY` in the server environment.
 
 ## Voice Routes
@@ -234,7 +211,7 @@ uv add "trillim[voice]"
 
 ### `POST /v1/audio/transcriptions`
 
-This is a raw-body route. Send audio bytes directly and set `content-type` to `audio/*` or `application/octet-stream`.
+This is a raw-body route. Send audio bytes directly and set `content-type` to `audio/wav`, `audio/x-wav`, or `application/octet-stream`.
 
 ```bash
 curl "http://127.0.0.1:8000/v1/audio/transcriptions?language=en" \
@@ -252,7 +229,9 @@ Key facts:
 
 - max upload size: `64 MiB`
 - `language` is optional
-- only one STT request is processed at a time
+- request bodies must contain raw `16-bit` little-endian mono `16 kHz` PCM or WAV that Trillim converts to that PCM format
+- only one HTTP STT request is processed at a time; a concurrent request fails fast with `429`
+- invalid `content-type`, invalid `content-length`, empty bodies, and mismatched body length are rejected before transcription starts
 
 ### `POST /v1/audio/speech`
 
@@ -276,9 +255,10 @@ Important facts:
 - the HTTP response is SSE, not WAV
 - PCM is `24 kHz`, mono, `16-bit`
 - max text body size: `6 MiB`
-- only one live TTS session is allowed at a time
+- only one live HTTP TTS request is allowed at a time across speech and voice-management routes
 
-If you want a ready-to-write WAV payload in Python, prefer `await tts.synthesize_wav(...)` from the SDK.
+The Python SDK returns raw PCM through `TTSSession.collect(text)` or `TTSSession.synthesize(text)`.
+If you need WAV, wrap the returned PCM in your application.
 
 ### `GET /v1/voices`
 
@@ -307,9 +287,14 @@ Response:
 Important facts:
 
 - max upload size: `10 MiB`
+- max custom voices: `64`; built-in voices do not count against this quota
 - max serialized custom voice state: `64 MiB`
 - custom voice names and `voice` selectors accept only ASCII letters and digits
 - custom voice storage lives under `~/.trillim/voices`
+- new custom voices are persisted as Pocket TTS-native `.safetensors`
+- legacy `.state` files and invalid safetensors files are skipped at startup with warnings and are not listed
+- built-in voices cannot be shadowed; to replace a custom voice, delete it and then register the same name again
+- while the server is running, the runtime voice cache is authoritative and disk storage is synchronized best-effort
 - voice cloning support requires accepting the `kyutai/pocket-tts` terms and authenticating with Hugging Face
 - if a reference sample exceeds the serialized voice-state cap, Trillim rejects it and you should retry with a shorter sample
 
@@ -328,6 +313,9 @@ Delete a custom voice:
 ```bash
 curl -X DELETE http://127.0.0.1:8000/v1/voices/myvoice
 ```
+
+Deleting a built-in voice returns a validation error.
+After deleting a custom voice, you may register the same name again with a new reference sample.
 
 ## Error Codes
 

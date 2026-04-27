@@ -1,9 +1,5 @@
-"""Tests for the managed TTS voice store."""
-
 from __future__ import annotations
 
-import asyncio
-import io
 import json
 import os
 import tempfile
@@ -11,670 +7,525 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import torch
-
+from trillim.components.tts._limits import MAX_CUSTOM_VOICES, MAX_VOICE_UPLOAD_BYTES, VOICE_MANIFEST_NAME
+from trillim.components.tts._validation import PayloadTooLargeError, save_voice_state_safetensors
 from trillim.components.tts._voices import (
-    ManagedVoiceEntry,
-    VoiceStore,
+    VOICE_STATE_SUFFIX,
     VoiceStoreTamperedError,
     _copy_source_audio_sync,
-    _storage_id_for_name,
+    _ensure_store_root,
+    _has_non_legacy_children,
+    _load_manifest,
+    _load_manifest_entry,
+    _load_optional_state,
+    _raise_if_symlink_for_write,
+    _warn_for_inventory_mismatch,
+    _warn_for_legacy_files,
+    _warn_if_symlink,
     copy_source_audio,
-    spool_request_voice_stream,
-    spool_voice_state_bytes,
+    delete_custom_voice,
+    load_custom_voice_states,
+    publish_custom_voice,
     spool_voice_bytes,
 )
 from trillim.errors import InvalidRequestError
 
-
-class _UnsafeState:
-    pass
+from tests.components.tts.support import sample_voice_state
 
 
-def _valid_state_bytes() -> bytes:
-    buffer = io.BytesIO()
-    torch.save({"layer": {"cache": torch.tensor([1.0])}}, buffer)
-    return buffer.getvalue()
-
-
-class _Chunks:
-    def __init__(self, chunks):
-        self._chunks = list(chunks)
-
-    def __aiter__(self):
-        return self._iterate()
-
-    async def _iterate(self):
-        for chunk in self._chunks:
-            yield chunk
-
-
-class TTSVoiceStoreTests(unittest.IsolatedAsyncioTestCase):
+class VoicePersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self._temp_dir.name) / "voices"
-        self.spool_dir = Path(self._temp_dir.name) / "spool"
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
 
     async def asyncTearDown(self) -> None:
         self._temp_dir.cleanup()
 
-    async def test_register_list_resolve_and_delete_custom_voice(self):
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
+    async def test_load_custom_voice_states_loads_only_valid_safetensors(self):
+        storage_id = _storage_id_for_name("custom")
+        state_path = self.root / f"{storage_id}{VOICE_STATE_SUFFIX}"
+        self.root.mkdir(parents=True)
+        save_voice_state_safetensors(sample_voice_state(), state_path)
+        manifest = {
+            "voices": [
+                {
+                    "name": "custom",
+                    "storage_id": storage_id,
+                    "size_bytes": state_path.stat().st_size,
+                }
+            ]
+        }
+        (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
 
-        async def fake_builder(audio_path: Path) -> bytes:
-            self.assertEqual(audio_path.read_bytes(), b"voice")
-            return _valid_state_bytes()
+        states = await load_custom_voice_states(
+            self.root,
+            built_in_voice_names=("alba",),
+        )
 
-        try:
-            self.assertEqual(
-                await self.store.register_owned_upload(
-                    name="custom",
-                    upload=upload,
-                    build_voice_state=fake_builder,
-                ),
-                "custom",
+        self.assertEqual(list(states), ["custom"])
+        self.assertEqual(states["custom"]["module"]["cache"].tolist(), [1.0])
+
+    async def test_load_custom_voice_states_skips_legacy_and_invalid_files_with_warning(self):
+        self.root.mkdir(parents=True)
+        (self.root / "legacy.state").write_bytes(b"legacy")
+        bad_storage_id = _storage_id_for_name("bad")
+        bad_path = self.root / f"{bad_storage_id}{VOICE_STATE_SUFFIX}"
+        bad_path.write_bytes(b"not safetensors")
+        manifest = {
+            "voices": [
+                {
+                    "name": "bad",
+                    "storage_id": bad_storage_id,
+                    "size_bytes": bad_path.stat().st_size,
+                }
+            ]
+        }
+        (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            states = await load_custom_voice_states(
+                self.root,
+                built_in_voice_names=("alba",),
             )
-        finally:
-            upload.path.unlink(missing_ok=True)
 
-        self.assertEqual(await self.store.list_names(), ["alba", "marius", "custom"])
-        resolved = await self.store.resolve_for_session("custom", spool_dir=self.spool_dir)
-        self.assertEqual(resolved.kind, "state_file")
-        self.assertTrue(Path(resolved.reference).exists())
-        Path(resolved.reference).unlink(missing_ok=True)
+        self.assertEqual(states, {})
+        self.assertIn("legacy", "\n".join(logs.output))
+        self.assertIn("valid safetensors", "\n".join(logs.output))
 
-        self.assertEqual(await self.store.delete("custom"), "custom")
-        self.assertEqual(await self.store.list_names(), ["alba", "marius"])
+    async def test_publish_and_delete_custom_voice_update_disk_manifest(self):
+        name, state = await publish_custom_voice(
+            self.root,
+            name="custom",
+            voice_state=sample_voice_state(),
+            existing_names={"alba"},
+        )
 
-    async def test_duplicate_or_builtin_name_is_rejected(self):
+        self.assertEqual(name, "custom")
+        self.assertEqual(state["module"]["cache"].tolist(), [1.0])
+        manifest_path = self.root / VOICE_MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["voices"][0]["name"], "custom")
+        state_path = self.root / f"{manifest['voices'][0]['storage_id']}{VOICE_STATE_SUFFIX}"
+        self.assertTrue(state_path.exists())
+
+        deleted = await delete_custom_voice(self.root, name="custom")
+        self.assertEqual(deleted, "custom")
+        self.assertFalse(state_path.exists())
+        self.assertEqual(
+            json.loads(manifest_path.read_text(encoding="utf-8")),
+            {"voices": []},
+        )
+
+    async def test_publish_rejects_duplicate_names(self):
+        await publish_custom_voice(
+            self.root,
+            name="custom",
+            voice_state=sample_voice_state(),
+            existing_names={"alba"},
+        )
+
         with self.assertRaisesRegex(InvalidRequestError, "already exists"):
-            await self.store.ensure_name_available("alba")
-
-    async def test_delete_rejects_default_or_missing_voice(self):
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-        async def fake_builder(_path: Path) -> bytes:
-            return _valid_state_bytes()
-        try:
-            await self.store.register_owned_upload(
+            await publish_custom_voice(
+                self.root,
                 name="custom",
-                upload=upload,
-                build_voice_state=fake_builder,
+                voice_state=sample_voice_state(),
+                existing_names={"alba", "custom"},
             )
-        finally:
-            upload.path.unlink(missing_ok=True)
-        with self.assertRaisesRegex(InvalidRequestError, "default_voice"):
-            await self.store.delete("custom", protected_name="custom")
-        with self.assertRaises(KeyError):
-            await self.store.delete("missing")
-
-    async def test_delete_failure_keeps_manifest_and_state_consistent(self):
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-
-        async def fake_builder(_path: Path) -> bytes:
-            return _valid_state_bytes()
-
-        try:
-            await self.store.register_owned_upload(
+        manifest_path = self.root / VOICE_MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        state_path = self.root / f"{manifest['voices'][0]['storage_id']}{VOICE_STATE_SUFFIX}"
+        state_path.unlink()
+        with self.assertRaisesRegex(InvalidRequestError, "already exists"):
+            await publish_custom_voice(
+                self.root,
                 name="custom",
-                upload=upload,
-                build_voice_state=fake_builder,
+                voice_state=sample_voice_state(),
+                existing_names={"alba"},
             )
-        finally:
-            upload.path.unlink(missing_ok=True)
+
+        with self.assertRaisesRegex(InvalidRequestError, "already contains"):
+            await publish_custom_voice(
+                self.root,
+                name="another",
+                voice_state=sample_voice_state(),
+                existing_names={f"voice{i}" for i in range(MAX_CUSTOM_VOICES)},
+            )
+        with self.assertRaisesRegex(InvalidRequestError, "malformed"):
+            await publish_custom_voice(
+                self.root,
+                name="badstate",
+                voice_state={},
+                existing_names={"alba"},
+            )
+        def save_empty_state(_state, path):
+            Path(path).write_bytes(b"")
+
+        with patch("trillim.components.tts._voices.save_voice_state_safetensors", save_empty_state):
+            with patch("trillim.components.tts._voices.load_safe_voice_state_safetensors") as load:
+                load.return_value = sample_voice_state()
+                with self.assertRaisesRegex(InvalidRequestError, "voice state exceeds"):
+                    await publish_custom_voice(
+                        self.root,
+                        name="emptystate",
+                        voice_state=sample_voice_state(),
+                        existing_names={"alba"},
+                    )
+
+        full_manifest = {
+            "voices": [
+                {
+                    "name": f"stored{i}",
+                    "storage_id": _storage_id_for_name(f"stored{i}"),
+                    "size_bytes": MAX_VOICE_UPLOAD_BYTES,
+                }
+                for i in range(10)
+            ]
+        }
+        (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(full_manifest), encoding="utf-8")
+        with self.assertRaisesRegex(InvalidRequestError, "custom voice storage exceeds"):
+            await publish_custom_voice(
+                self.root,
+                name="huge",
+                voice_state=sample_voice_state(),
+                existing_names={"alba"},
+            )
+
+    async def test_publish_rolls_back_state_file_when_manifest_write_fails(self):
+        storage_id = _storage_id_for_name("custom")
+        state_path = self.root / f"{storage_id}{VOICE_STATE_SUFFIX}"
 
         with patch(
-            "trillim.components.tts._voices.unlink_if_exists",
-            side_effect=PermissionError("read only"),
-        ):
-            with self.assertRaisesRegex(PermissionError, "read only"):
-                await self.store.delete("custom")
-        self.assertEqual(await self.store.list_names(), ["alba", "marius", "custom"])
-        resolved = await self.store.resolve_for_session("custom", spool_dir=self.spool_dir)
-        Path(resolved.reference).unlink(missing_ok=True)
-
-    async def test_register_owned_upload_rejects_malformed_worker_state_and_cleans_up_publish_failures(self):
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-        try:
-            with self.assertRaisesRegex(RuntimeError, "malformed voice state"):
-                await self.store.register_owned_upload(
-                    name="custom",
-                    upload=upload,
-                    build_voice_state=lambda _path: asyncio.sleep(0, result=b"not-torch"),
-                )
-        finally:
-            upload.path.unlink(missing_ok=True)
-
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-
-        async def fake_builder(_path: Path) -> bytes:
-            return _valid_state_bytes()
-
-        try:
-            with patch.object(
-                self.store,
-                "_write_manifest_locked",
-                side_effect=OSError("manifest boom"),
-            ):
-                with self.assertRaisesRegex(OSError, "manifest boom"):
-                    await self.store.register_owned_upload(
-                        name="custom",
-                        upload=upload,
-                        build_voice_state=fake_builder,
-                    )
-        finally:
-            upload.path.unlink(missing_ok=True)
-
-        self.assertEqual(await self.store.list_names(), ["alba", "marius"])
-        self.assertEqual(list(self.root.glob("*.state")), [])
-
-    async def test_voice_store_limits_and_delete_rollback_are_enforced(self):
-        async def fake_builder(_path: Path) -> bytes:
-            return _valid_state_bytes()
-
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-        try:
-            with patch("trillim.components.tts._voices.MAX_CUSTOM_VOICES", 0):
-                with self.assertRaisesRegex(InvalidRequestError, "already contains"):
-                    await self.store.register_owned_upload(
-                        name="custom",
-                        upload=upload,
-                        build_voice_state=fake_builder,
-                    )
-        finally:
-            upload.path.unlink(missing_ok=True)
-
-        state_bytes = _valid_state_bytes()
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-        try:
-            with patch(
-                "trillim.components.tts._voices.MAX_TOTAL_CUSTOM_VOICE_BYTES",
-                len(state_bytes) - 1,
-            ):
-                with self.assertRaisesRegex(InvalidRequestError, "storage exceeds"):
-                    await self.store.register_owned_upload(
-                        name="custom",
-                        upload=upload,
-                        build_voice_state=fake_builder,
-                    )
-        finally:
-            upload.path.unlink(missing_ok=True)
-
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-        try:
-            await self.store.register_owned_upload(
-                name="custom",
-                upload=upload,
-                build_voice_state=fake_builder,
-            )
-        finally:
-            upload.path.unlink(missing_ok=True)
-        state_path = self.root / f"{_storage_id_for_name('custom')}.state"
-        original_state = state_path.read_bytes()
-
-        with patch.object(
-            self.store,
-            "_write_manifest_locked",
+            "trillim.components.tts._voices.atomic_write_bytes",
             side_effect=OSError("manifest boom"),
         ):
             with self.assertRaisesRegex(OSError, "manifest boom"):
-                await self.store.delete("custom")
-
-        self.assertEqual(state_path.read_bytes(), original_state)
-        self.assertIn("custom", await self.store.list_names())
-
-    async def test_spool_request_stream_and_copy_source_audio(self):
-        owned = await spool_request_voice_stream(_Chunks([b"a", b"b"]), spool_dir=self.spool_dir)
-        self.assertEqual(owned.size_bytes, 2)
-        self.assertEqual(owned.path.read_bytes(), b"ab")
-        owned.path.unlink(missing_ok=True)
-
-        source = Path(self._temp_dir.name) / "voice.wav"
-        source.write_bytes(b"hello")
-        copied = await copy_source_audio(source, spool_dir=self.spool_dir)
-        self.assertEqual(copied.path.read_bytes(), b"hello")
-        copied.path.unlink(missing_ok=True)
-
-    async def test_copy_source_audio_rejects_empty_string_paths_before_touching_cwd(self):
-        with self.assertRaisesRegex(InvalidRequestError, "path is required"):
-            await copy_source_audio("", spool_dir=self.spool_dir)
-
-    async def test_tampered_manifest_disables_custom_voice_functionality(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "voices": [
-                        {
-                            "name": "custom",
-                            "storage_id": "../escape",
-                            "size_bytes": 4,
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.list_names()
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.ensure_name_available("fresh")
-        resolved = await self.store.resolve_for_session("alba", spool_dir=self.spool_dir)
-        self.assertEqual(resolved.reference, "alba")
-
-    async def test_manifest_with_path_like_voice_name_fails_closed(self):
-        for name in ("../escape", "bad-name"):
-            with self.subTest(name=name):
-                state_bytes = _valid_state_bytes()
-                storage_id = _storage_id_for_name(name)
-                self.root.mkdir(parents=True, exist_ok=True)
-                (self.root / f"{storage_id}.state").write_bytes(state_bytes)
-                (self.root / "manifest.json").write_text(
-                    json.dumps(
-                        {
-                            "voices": [
-                                {
-                                    "name": name,
-                                    "storage_id": storage_id,
-                                    "size_bytes": len(state_bytes),
-                                }
-                            ]
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-
-                with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-                    await self.store.list_names()
-                self.store = VoiceStore(
+                await publish_custom_voice(
                     self.root,
-                    built_in_voice_names=("alba", "marius"),
+                    name="custom",
+                    voice_state=sample_voice_state(),
+                    existing_names={"alba"},
                 )
-                for child in self.root.iterdir():
-                    child.unlink()
 
-    async def test_store_methods_reject_non_alphanumeric_voice_names(self):
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
+        self.assertFalse(state_path.exists())
 
-        async def fail_builder(_path: Path) -> bytes:
-            raise AssertionError("build_voice_state should not be called")
+    async def test_delete_rejects_symlinked_state_file_for_write_safety(self):
+        await publish_custom_voice(
+            self.root,
+            name="custom",
+            voice_state=sample_voice_state(),
+            existing_names={"alba"},
+        )
+        state_path = self.root / f"{_storage_id_for_name('custom')}{VOICE_STATE_SUFFIX}"
+        target_path = self.root / "target.safetensors"
+        state_path.rename(target_path)
+        state_path.symlink_to(target_path)
 
-        try:
-            with self.assertRaisesRegex(
-                InvalidRequestError,
-                "must contain only letters and digits",
-            ):
-                await self.store.ensure_name_available("bad-name")
-            with self.assertRaisesRegex(
-                InvalidRequestError,
-                "must contain only letters and digits",
-            ):
-                await self.store.register_owned_upload(
-                    name="bad-name",
-                    upload=upload,
-                    build_voice_state=fail_builder,
-                )
-            with self.assertRaisesRegex(
-                InvalidRequestError,
-                "must contain only letters and digits",
-            ):
-                await self.store.delete("bad-name")
-            with self.assertRaisesRegex(
-                InvalidRequestError,
-                "must contain only letters and digits",
-            ):
-                await self.store.resolve_for_session(
-                    "bad-name",
-                    spool_dir=self.spool_dir,
-                )
-        finally:
-            upload.path.unlink(missing_ok=True)
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING"):
+            with self.assertRaisesRegex(VoiceStoreTamperedError, "symlinks"):
+                await delete_custom_voice(self.root, name="custom")
 
-    async def test_non_directory_voice_store_root_fails_closed(self):
-        self.root.write_text("not a directory", encoding="utf-8")
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.list_names()
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.ensure_name_available("fresh")
-        resolved = await self.store.resolve_for_session("alba", spool_dir=self.spool_dir)
-        self.assertEqual(resolved.reference, "alba")
+    async def test_delete_missing_voice_returns_normalized_name(self):
+        self.assertEqual(await delete_custom_voice(self.root, name="missing"), "missing")
 
-    async def test_missing_manifest_with_leftover_files_fails_closed(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / f"{_storage_id_for_name('custom')}.state").write_bytes(_valid_state_bytes())
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.list_names()
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.ensure_name_available("custom")
-        resolved = await self.store.resolve_for_session("alba", spool_dir=self.spool_dir)
-        self.assertEqual(resolved.reference, "alba")
+    async def test_malformed_manifest_is_skipped_with_warning(self):
+        self.root.mkdir(parents=True)
+        (self.root / VOICE_MANIFEST_NAME).write_text("{", encoding="utf-8")
 
-    async def test_tampered_state_file_disables_custom_voice_resolution(self):
-        upload = await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-
-        async def fake_builder(_path: Path) -> bytes:
-            return _valid_state_bytes()
-
-        try:
-            await self.store.register_owned_upload(
-                name="custom",
-                upload=upload,
-                build_voice_state=fake_builder,
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            states = await load_custom_voice_states(
+                self.root,
+                built_in_voice_names=("alba",),
             )
-        finally:
-            upload.path.unlink(missing_ok=True)
 
-        initial = await self.store.resolve_for_session("custom", spool_dir=self.spool_dir)
-        Path(initial.reference).unlink(missing_ok=True)
+        self.assertEqual(states, {})
+        self.assertIn("manifest is malformed", "\n".join(logs.output))
 
-        buffer = io.BytesIO()
-        torch.save({"bad": _UnsafeState()}, buffer)
-        state_path = self.root / f"{_storage_id_for_name('custom')}.state"
-        state_path.write_bytes(buffer.getvalue())
-
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.resolve_for_session("custom", spool_dir=self.spool_dir)
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.list_names()
-        resolved = await self.store.resolve_for_session("alba", spool_dir=self.spool_dir)
-        self.assertEqual(resolved.reference, "alba")
-
-    async def test_manifest_is_revalidated_after_initial_successful_read(self):
-        storage_id = _storage_id_for_name("custom")
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / f"{storage_id}.state").write_bytes(_valid_state_bytes())
-        (self.root / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "voices": [
-                        {
-                            "name": "custom",
-                            "storage_id": storage_id,
-                            "size_bytes": len(_valid_state_bytes()),
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        self.assertEqual(await self.store.list_names(), ["alba", "marius", "custom"])
-
-        (self.root / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "voices": [
-                        {
-                            "name": "custom",
-                            "storage_id": "../escape",
-                            "size_bytes": len(_valid_state_bytes()),
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.list_names()
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.ensure_name_available("fresh")
-
-    async def test_manifest_shape_and_inventory_failures_disable_custom_voices(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-
-        for payload in (
-            b"not-json",
-            json.dumps([]).encode("utf-8"),
-            json.dumps({"voices": {}}).encode("utf-8"),
-        ):
+    async def test_malformed_manifest_payload_shapes_are_skipped_with_warning(self):
+        self.root.mkdir(parents=True)
+        for payload in ([], {"voices": "bad"}):
             with self.subTest(payload=payload):
-                (self.root / "manifest.json").write_bytes(payload)
-                with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-                    await self.store.list_names()
-                self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
+                (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+                    self.assertEqual(
+                        await load_custom_voice_states(self.root, built_in_voice_names=("alba",)),
+                        {},
+                    )
+                self.assertIn("manifest is malformed", "\n".join(logs.output))
 
-        state_bytes = _valid_state_bytes()
-        storage_id = _storage_id_for_name("custom")
-        (self.root / f"{storage_id}.state").write_bytes(state_bytes)
-        (self.root / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "voices": [
-                        {
-                            "name": "alba",
-                            "storage_id": _storage_id_for_name("alba"),
-                            "size_bytes": len(state_bytes),
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            await self.store.list_names()
-
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        for child in self.root.iterdir():
-            child.unlink()
-        self.root.mkdir(exist_ok=True)
-        extra_state = self.root / "extra.state"
-        extra_state.write_bytes(state_bytes)
-        (self.root / "manifest.json").write_text(json.dumps({"voices": []}), encoding="utf-8")
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "unexpected files"):
-            await self.store.list_names()
-
-    async def test_internal_validation_helpers_cover_state_and_symlink_failures(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        valid_state = _valid_state_bytes()
-        state_path = self.root / "state.state"
-        state_path.write_bytes(valid_state)
-
-        with patch(
-            "trillim.components.tts._voices.validate_voice_state_bytes",
-            side_effect=InvalidRequestError("bad state"),
-        ):
-            with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-                self.store._load_state_bytes_locked(
-                    ManagedVoiceEntry(name="custom", storage_id="state", size_bytes=len(valid_state))
-                )
-
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            self.store._load_state_bytes_locked(
-                ManagedVoiceEntry(name="custom", storage_id="state", size_bytes=len(valid_state) - 1)
-            )
-
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        state_path.write_bytes(b"x")
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "tampered"):
-            self.store._load_state_bytes_locked(
-                ManagedVoiceEntry(name="custom", storage_id="state", size_bytes=1)
-            )
-
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "missing"):
-            self.store._validate_manifest_state_file_locked(
-                ManagedVoiceEntry(name="custom", storage_id="missing", size_bytes=1)
-            )
-
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        directory_state = self.root / "dir.state"
-        directory_state.mkdir()
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "malformed"):
-            self.store._validate_manifest_state_file_locked(
-                ManagedVoiceEntry(name="custom", storage_id="dir", size_bytes=1)
-            )
-
-        self.store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        target = Path(self._temp_dir.name) / "voice-target"
+    async def test_manifest_root_symlink_and_file_root_are_skipped(self):
+        self.root.parent.mkdir(parents=True, exist_ok=True)
+        target = self.root.parent / "target"
         target.mkdir()
-        symlink_root = Path(self._temp_dir.name) / "voice-link"
-        symlink_root.symlink_to(target)
-        symlink_store = VoiceStore(symlink_root, built_in_voice_names=("alba", "marius"))
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "symlinks"):
-            await symlink_store.list_names()
+        self.root.symlink_to(target)
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            self.assertEqual(_load_manifest(self.root, built_ins=set()), {})
+        self.assertIn("symlink", "\n".join(logs.output))
 
-        link = Path(self._temp_dir.name) / "file-link"
-        target_file = Path(self._temp_dir.name) / "target.txt"
-        target_file.write_text("x", encoding="utf-8")
-        link.symlink_to(target_file)
-        with self.assertRaisesRegex(RuntimeError, "no symlinks"):
-            self.store._raise_if_symlink(link, "no symlinks")
+        self.root.unlink()
+        self.root.write_text("not a directory", encoding="utf-8")
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            self.assertEqual(_load_manifest(self.root, built_ins=set()), {})
+        self.assertIn("root is malformed", "\n".join(logs.output))
 
-    async def test_spooling_helpers_cleanup_temp_files_on_write_failures(self):
-        source = Path(self._temp_dir.name) / "voice.wav"
-        source.write_bytes(b"voice")
-        source_fd = os.open(source, os.O_RDONLY)
-        original_close = os.close
-        closed: list[int] = []
+    async def test_malformed_manifest_entries_are_skipped_with_warning(self):
+        self.root.mkdir(parents=True)
+        manifest = {
+            "voices": [
+                "not an entry",
+                {"name": "bad-name", "storage_id": "x", "size_bytes": 1},
+                {"name": "alba", "storage_id": _storage_id_for_name("alba"), "size_bytes": 1},
+            ]
+        }
+        (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
 
-        def tracked_close(fd: int) -> None:
-            closed.append(fd)
-            original_close(fd)
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            states = await load_custom_voice_states(
+                self.root,
+                built_in_voice_names=("alba",),
+            )
 
-        with patch(
-            "trillim.components.tts._voices.os.fdopen",
-            side_effect=OSError("fdopen boom"),
-        ):
-            with self.assertRaisesRegex(OSError, "fdopen boom"):
-                await spool_voice_bytes(b"voice", spool_dir=self.spool_dir)
-            with self.assertRaisesRegex(OSError, "fdopen boom"):
-                await spool_voice_state_bytes(b"voice", spool_dir=self.spool_dir)
-        self.assertEqual(list(self.spool_dir.glob("*")), [])
+        self.assertEqual(states, {})
+        self.assertIn("malformed custom TTS voice manifest entry", "\n".join(logs.output))
 
-        with patch(
-            "trillim.components.tts._voices.os.fdopen",
-            side_effect=OSError("fdopen boom"),
-        ), patch(
-            "trillim.components.tts._voices.os.close",
-            side_effect=tracked_close,
-        ):
-            with self.assertRaisesRegex(OSError, "fdopen boom"):
-                _copy_source_audio_sync(source_fd, self.spool_dir)
-
-        self.assertIn(source_fd, closed)
-
-    async def test_internal_manifest_entry_and_directory_error_branches(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        original_iterdir = Path.iterdir
-
-        def failing_iterdir(path: Path):
-            if path == self.root:
-                raise OSError("boom")
-            return original_iterdir(path)
-
-        with patch("pathlib.Path.iterdir", autospec=True, side_effect=failing_iterdir):
-            with self.assertRaisesRegex(VoiceStoreTamperedError, "malformed"):
-                await self.store.list_names()
-
-        file_root = Path(self._temp_dir.name) / "file-root"
-        file_root.write_text("x", encoding="utf-8")
-        file_store = VoiceStore(file_root, built_in_voice_names=("alba", "marius"))
-        with self.assertRaisesRegex(VoiceStoreTamperedError, "malformed"):
-            file_store._ensure_store_root_locked()
-
-        for item in (
-            123,
-            {"name": "custom"},
-            {"name": " custom ", "storage_id": "id", "size_bytes": 1},
-            {"name": "custom", "storage_id": "id", "size_bytes": 0},
-        ):
-            store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-            with self.subTest(item=item):
-                with self.assertRaisesRegex(VoiceStoreTamperedError, "malformed"):
-                    store._load_manifest_entry_locked(item)
-
-        original_stat = Path.stat
-        err_path = self.root / "err.state"
-        err_path.write_bytes(b"x")
-
-        def failing_stat(path: Path, *args, **kwargs):
-            if path == err_path:
-                raise OSError("boom")
-            return original_stat(path, *args, **kwargs)
-
-        store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        with patch("pathlib.Path.is_symlink", return_value=False), patch(
-            "pathlib.Path.stat",
-            autospec=True,
-            side_effect=failing_stat,
-        ):
-            with self.assertRaisesRegex(VoiceStoreTamperedError, "malformed"):
-                store._validate_manifest_state_file_locked(
-                    ManagedVoiceEntry(name="custom", storage_id="err", size_bytes=1)
-                )
-
-        store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        with patch("pathlib.Path.iterdir", autospec=True, side_effect=failing_iterdir):
-            with self.assertRaisesRegex(VoiceStoreTamperedError, "malformed"):
-                store._validate_store_inventory_locked({})
-
-        store = VoiceStore(self.root, built_in_voice_names=("alba", "marius"))
-        first = second = None
-        try:
-            store._mark_store_tampered_locked("first")
-        except VoiceStoreTamperedError as exc:
-            first = exc
-        try:
-            store._mark_store_tampered_locked("second")
-        except VoiceStoreTamperedError as exc:
-            second = exc
-        self.assertIs(first, second)
-
-    async def test_untracked_state_files_fail_closed_with_cleanup_guidance(self):
-        storage_id = _storage_id_for_name("custom")
-        self.root.mkdir(parents=True, exist_ok=True)
-        state_bytes = _valid_state_bytes()
-        (self.root / f"{storage_id}.state").write_bytes(state_bytes)
-        (self.root / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "voices": [
-                        {
-                            "name": "custom",
-                            "storage_id": storage_id,
-                            "size_bytes": len(state_bytes),
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
+    async def test_manifest_entry_shape_validation_rejects_each_bad_field(self):
+        cases = (
+            {},
+            {"name": "", "storage_id": "x", "size_bytes": 1},
+            {"name": "custom", "storage_id": 1, "size_bytes": 1},
+            {"name": "custom", "storage_id": _storage_id_for_name("custom"), "size_bytes": "1"},
+            {"name": "custom", "storage_id": _storage_id_for_name("custom"), "size_bytes": 0},
+            {"name": "custom", "storage_id": "wrong", "size_bytes": 1},
         )
-        (self.root / f"{_storage_id_for_name('orphan')}.state").write_bytes(state_bytes)
+        for item in cases:
+            with self.subTest(item=item):
+                with self.assertLogs("trillim.components.tts._voices", level="WARNING"):
+                    self.assertIsNone(_load_manifest_entry(item))
 
-        with self.assertRaisesRegex(
-            VoiceStoreTamperedError,
-            r"Delete stale \.state files",
-        ):
-            await self.store.list_names()
-        with self.assertRaisesRegex(
-            VoiceStoreTamperedError,
-            r"Delete stale \.state files",
-        ):
-            await self.store.ensure_name_available("fresh")
+    async def test_missing_manifest_with_legacy_and_unexpected_files_warns_and_skips(self):
+        self.root.mkdir(parents=True)
+        (self.root / "legacy.state").write_bytes(b"legacy")
+        (self.root / "unexpected.safetensors").write_bytes(b"not tracked")
 
-    async def test_resolve_unknown_voice_and_delete_builtin_voice_are_rejected(self):
-        with self.assertRaisesRegex(InvalidRequestError, "unknown voice"):
-            await self.store.resolve_for_session("missing", spool_dir=self.spool_dir)
-        with self.assertRaisesRegex(InvalidRequestError, "built in"):
-            await self.store.delete("alba")
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            states = await load_custom_voice_states(
+                self.root,
+                built_in_voice_names=("alba",),
+            )
 
-    async def test_spool_request_stream_and_copy_source_audio_enforce_size_and_empty_limits(self):
-        with self.assertRaisesRegex(InvalidRequestError, "must not be empty"):
-            await spool_request_voice_stream(_Chunks([b"", b""]), spool_dir=self.spool_dir)
-        self.assertEqual(list(self.spool_dir.glob("*")), [])
+        output = "\n".join(logs.output)
+        self.assertEqual(states, {})
+        self.assertIn("legacy", output)
+        self.assertIn("manifest is missing", output)
 
-        with patch("trillim.components.tts._voices.MAX_VOICE_UPLOAD_BYTES", 3):
-            with self.assertRaisesRegex(InvalidRequestError, "byte limit"):
-                await spool_request_voice_stream(
-                    _Chunks([b"ab", b"cd"]),
-                    spool_dir=self.spool_dir,
-                )
-        self.assertEqual(list(self.spool_dir.glob("*")), [])
+    async def test_missing_manifest_without_inventory_noise_returns_empty(self):
+        self.root.mkdir(parents=True)
+        self.assertEqual(
+            await load_custom_voice_states(self.root, built_in_voice_names=("alba",)),
+            {},
+        )
 
-        source = Path(self._temp_dir.name) / "large-voice.wav"
-        source.write_bytes(b"abcdef")
-        with patch("trillim.components.tts._voices.MAX_VOICE_UPLOAD_BYTES", 3):
-            with self.assertRaisesRegex(InvalidRequestError, "byte limit"):
-                await copy_source_audio(source, spool_dir=self.spool_dir)
-        self.assertEqual(list(self.spool_dir.glob("*")), [])
+    async def test_inventory_mismatch_warns_and_keeps_valid_manifest_voices(self):
+        storage_id = _storage_id_for_name("custom")
+        state_path = self.root / f"{storage_id}{VOICE_STATE_SUFFIX}"
+        self.root.mkdir(parents=True)
+        save_voice_state_safetensors(sample_voice_state(), state_path)
+        (self.root / "orphan.safetensors").write_bytes(b"orphan")
+        manifest = {
+            "voices": [
+                {
+                    "name": "custom",
+                    "storage_id": storage_id,
+                    "size_bytes": state_path.stat().st_size,
+                }
+            ]
+        }
+        (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            states = await load_custom_voice_states(
+                self.root,
+                built_in_voice_names=("alba",),
+            )
+
+        self.assertEqual(list(states), ["custom"])
+        self.assertIn("unexpected TTS voice store files", "\n".join(logs.output))
+
+    async def test_inventory_and_legacy_warning_os_errors_are_handled(self):
+        with patch.object(Path, "iterdir", side_effect=OSError("boom")):
+            with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+                _warn_for_inventory_mismatch(self.root, {})
+            self.assertIn("inventory check", "\n".join(logs.output))
+
+            with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+                _warn_for_legacy_files(self.root)
+            self.assertIn("voice store root is malformed", "\n".join(logs.output))
+
+            with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+                self.assertFalse(_has_non_legacy_children(self.root))
+            self.assertIn("voice store root is malformed", "\n".join(logs.output))
+
+        self.root.mkdir(parents=True)
+        (self.root / "regular.txt").write_text("regular", encoding="utf-8")
+        _warn_for_legacy_files(self.root)
+        target = self.root / "target.txt"
+        target.write_text("target", encoding="utf-8")
+        (self.root / "linked.state").symlink_to(target)
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            _warn_for_legacy_files(self.root)
+        self.assertIn("symlink", "\n".join(logs.output))
+
+    async def test_manifest_size_mismatch_skips_voice(self):
+        storage_id = _storage_id_for_name("custom")
+        state_path = self.root / f"{storage_id}{VOICE_STATE_SUFFIX}"
+        self.root.mkdir(parents=True)
+        save_voice_state_safetensors(sample_voice_state(), state_path)
+        manifest = {
+            "voices": [
+                {
+                    "name": "custom",
+                    "storage_id": storage_id,
+                    "size_bytes": state_path.stat().st_size + 1,
+                }
+            ]
+        }
+        (self.root / VOICE_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            states = await load_custom_voice_states(
+                self.root,
+                built_in_voice_names=("alba",),
+            )
+
+        self.assertEqual(states, {})
+        self.assertIn("size does not match manifest", "\n".join(logs.output))
+
+    async def test_manifest_and_state_symlink_guards(self):
+        self.root.mkdir(parents=True)
+        manifest_target = self.root / "target.json"
+        manifest_target.write_text(json.dumps({"voices": []}), encoding="utf-8")
+        (self.root / VOICE_MANIFEST_NAME).symlink_to(manifest_target)
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            self.assertEqual(_load_manifest(self.root, built_ins=set()), {})
+        self.assertIn("symlink", "\n".join(logs.output))
+
+        state_target = self.root / "target.safetensors"
+        save_voice_state_safetensors(sample_voice_state(), state_target)
+        state_link = self.root / f"{_storage_id_for_name('custom')}{VOICE_STATE_SUFFIX}"
+        state_link.symlink_to(state_target)
+        entry = _load_manifest_entry(
+            {
+                "name": "custom",
+                "storage_id": _storage_id_for_name("custom"),
+                "size_bytes": state_target.stat().st_size,
+            }
+        )
+        assert entry is not None
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            self.assertIsNone(_load_optional_state(entry, state_link))
+        self.assertIn("symlink", "\n".join(logs.output))
+
+    async def test_optional_state_missing_unreadable_and_non_file_paths_are_skipped(self):
+        entry = _load_manifest_entry(
+            {
+                "name": "custom",
+                "storage_id": _storage_id_for_name("custom"),
+                "size_bytes": 1,
+            }
+        )
+        assert entry is not None
+        state_path = self.root / f"{entry.storage_id}{VOICE_STATE_SUFFIX}"
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            self.assertIsNone(_load_optional_state(entry, state_path))
+        self.assertIn("missing", "\n".join(logs.output))
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        state_path.mkdir()
+        with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+            self.assertIsNone(_load_optional_state(entry, state_path))
+        self.assertIn("not a regular file", "\n".join(logs.output))
+
+        with patch("trillim.components.tts._voices._warn_if_symlink", return_value=False):
+            with patch.object(Path, "stat", side_effect=OSError("stat")):
+                with self.assertLogs("trillim.components.tts._voices", level="WARNING") as logs:
+                    self.assertIsNone(_load_optional_state(entry, state_path))
+                self.assertIn("could not be read", "\n".join(logs.output))
+
+    async def test_store_root_write_guards(self):
+        self.root.parent.mkdir(parents=True, exist_ok=True)
+        self.root.write_text("not a directory", encoding="utf-8")
+        with self.assertRaisesRegex(VoiceStoreTamperedError, "root is malformed"):
+            _ensure_store_root(self.root)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            link.symlink_to(target)
+            self.assertTrue(_warn_if_symlink(link, "reason"))
+            with self.assertRaisesRegex(VoiceStoreTamperedError, "symlinks"):
+                _raise_if_symlink_for_write(link)
+
+    async def test_spool_and_copy_voice_uploads(self):
+        spool_dir = self.root / "spool"
+        upload = await spool_voice_bytes(b"voice", spool_dir=spool_dir)
+        self.assertEqual(upload.path.read_bytes(), b"voice")
+        self.assertEqual(upload.size_bytes, 5)
+
+        source = self.root / "source.wav"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"audio")
+        copied = await copy_source_audio(source, spool_dir=spool_dir)
+        self.assertEqual(copied.path.read_bytes(), b"audio")
+        self.assertEqual(copied.size_bytes, 5)
+
+    async def test_spool_and_copy_cleanup_on_errors(self):
+        spool_dir = self.root / "spool"
+        with patch("trillim.components.tts._voices.os.fdopen", side_effect=OSError("write")):
+            with self.assertRaisesRegex(OSError, "write"):
+                await spool_voice_bytes(b"voice", spool_dir=spool_dir)
+
+        source = self.root / "large.wav"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"x" * (MAX_VOICE_UPLOAD_BYTES + 1))
+        fd = os.open(source, os.O_RDONLY)
+        try:
+            with self.assertRaisesRegex(PayloadTooLargeError, "voice upload exceeds"):
+                _copy_source_audio_sync(fd, spool_dir)
+            fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+        fd = os.open(source, os.O_RDONLY)
+        try:
+            with patch("trillim.components.tts._voices._create_owned_temp_file", side_effect=OSError("temp")):
+                with self.assertRaisesRegex(OSError, "temp"):
+                    _copy_source_audio_sync(fd, spool_dir)
+                fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+        fd = os.open(source, os.O_RDONLY)
+        temp_fd, temp_name = tempfile.mkstemp(dir=self.root, prefix="copy-", suffix=".audio")
+        temp_path = Path(temp_name)
+        os.close(temp_fd)
+        try:
+            with patch(
+                "trillim.components.tts._voices._create_owned_temp_file",
+                return_value=(os.open(temp_path, os.O_WRONLY), temp_path),
+            ):
+                with patch("trillim.components.tts._voices.os.fdopen", side_effect=OSError("fdopen")):
+                    with self.assertRaisesRegex(OSError, "fdopen"):
+                        _copy_source_audio_sync(fd, spool_dir)
+                fd = -1
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+
+def _storage_id_for_name(name: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]

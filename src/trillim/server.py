@@ -12,7 +12,7 @@ from trillim.components import Component
 class Server:
     """Compose Trillim components into a FastAPI server."""
 
-    def __init__(self, *components: Component, allow_hot_swap: bool = False):
+    def __init__(self, *components: Component):
         """Create a server from one or more components."""
         if not components:
             raise ValueError("Server requires at least one component")
@@ -24,13 +24,7 @@ class Server:
                 )
             seen_names.add(component.component_name)
         self._components = tuple(components)
-        self._allow_hot_swap = allow_hot_swap
         self._app: FastAPI | None = None
-
-    @property
-    def allow_hot_swap(self) -> bool:
-        """Return whether LLM hot swap routes are allowed."""
-        return self._allow_hot_swap
 
     @property
     def components(self) -> tuple[Component, ...]:
@@ -41,10 +35,6 @@ class Server:
     def app(self) -> FastAPI:
         """Return the lazily constructed FastAPI application."""
         if self._app is None:
-            for component in self._components:
-                configure = getattr(component, "_set_hot_swap_routes_enabled", None)
-                if callable(configure):
-                    configure(self._allow_hot_swap and component.component_name == "llm")
             self._app = build_app(self._components)
         return self._app
 

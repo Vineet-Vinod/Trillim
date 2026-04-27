@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 from trillim.components.llm._config import InitConfig, ModelRuntimeConfig, SamplingDefaults
@@ -25,65 +24,6 @@ class EngineProtocolError(EngineError):
 
 class EngineProgressTimeoutError(EngineError, TimeoutError):
     """Raised when the inference worker stops making progress."""
-
-
-@dataclass(frozen=True, slots=True)
-class _PromptSnapshot:
-    token_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _CachePlan:
-    request: _PromptSnapshot
-    delta_tokens: tuple[int, ...]
-    reset_flag: int
-    cache_hit: int
-
-
-class _PromptCache:
-    def __init__(self) -> None:
-        self.clear()
-
-    @property
-    def token_ids(self) -> tuple[int, ...]:
-        return self._token_ids
-
-    @property
-    def last_cache_hit(self) -> int:
-        return self._last_cache_hit
-
-    def clear(self) -> None:
-        self._token_ids: tuple[int, ...] = ()
-        self._last_cache_hit = 0
-
-    def plan(self, token_ids: Sequence[int]) -> _CachePlan:
-        request = _PromptSnapshot(tuple(token_ids))
-        shared = 0
-        limit = min(len(request.token_ids), len(self._token_ids))
-        while shared < limit and request.token_ids[shared] == self._token_ids[shared]:
-            shared += 1
-        if shared > 0 and shared == len(self._token_ids):
-            return _CachePlan(
-                request=request,
-                delta_tokens=request.token_ids[shared:],
-                reset_flag=0,
-                cache_hit=shared,
-            )
-        return _CachePlan(
-            request=request,
-            delta_tokens=request.token_ids,
-            reset_flag=1,
-            cache_hit=0,
-        )
-
-    def commit(self, plan: _CachePlan, generated: Sequence[int], kv_position: int) -> None:
-        combined = plan.request.token_ids + tuple(generated)
-        if kv_position < 0 or kv_position > len(combined):
-            raise EngineProtocolError(
-                f"Invalid kv_position {kv_position}; expected a value between 0 and {len(combined)}"
-            )
-        self._token_ids = combined[:kv_position]
-        self._last_cache_hit = plan.cache_hit
 
 
 class InferenceEngine:
@@ -109,35 +49,7 @@ class InferenceEngine:
         self.progress_timeout = progress_timeout
         self.binary_path = _bundled_binary_path()
         self.process: asyncio.subprocess.Process | None = None
-        self._lock = asyncio.Lock()
-        self._prompt_cache = _PromptCache()
-        self._last_prompt_tokens = 0
-        self._last_completion_tokens = 0
-
-    @property
-    def cached_token_ids(self) -> list[int]:
-        """Return the engine's authoritative cached token prefix."""
-        return list(self._prompt_cache.token_ids)
-
-    @property
-    def cached_token_count(self) -> int:
-        """Return the number of cached tokens after the last completed turn."""
-        return len(self._prompt_cache.token_ids)
-
-    @property
-    def last_cache_hit(self) -> int:
-        """Return the prompt-cache hit length for the last request."""
-        return self._prompt_cache.last_cache_hit
-
-    @property
-    def last_prompt_tokens(self) -> int:
-        """Return the authoritative prompt-token count for the last request."""
-        return self._last_prompt_tokens
-
-    @property
-    def last_completion_tokens(self) -> int:
-        """Return the authoritative completion-token count for the last request."""
-        return self._last_completion_tokens
+        self._cached_token_ids: tuple[int, ...] = ()
 
     async def start(self) -> None:
         """Start the inference worker and send its init block."""
@@ -158,8 +70,7 @@ class InferenceEngine:
 
     async def stop(self) -> None:
         """Stop the worker and clear cached prompt state."""
-        self._prompt_cache.clear()
-        self._clear_usage()
+        self._cached_token_ids = ()
         process = self.process
         self.process = None
         if process is None or process.returncode is not None:
@@ -176,6 +87,11 @@ class InferenceEngine:
                 return
             await process.wait()
 
+    async def recover(self) -> None:
+        """Restart the worker after a failed or cancelled generation."""
+        await self.stop()
+        await self.start()
+
     async def generate(
         self,
         token_ids: Sequence[int],
@@ -188,67 +104,65 @@ class InferenceEngine:
         max_tokens: int | None = None,
     ) -> AsyncIterator[int]:
         """Generate tokens from the worker and update prompt-cache state."""
-        async with self._lock:
-            process = self._require_running()
-            plan = self._prompt_cache.plan(token_ids)
-            completed = False
-            generated: list[int] = []
-            try:
-                await self._write_block(
-                    _build_request_block(
-                        delta_tokens=plan.delta_tokens,
-                        reset_flag=plan.reset_flag,
-                        temperature=self.defaults.temperature if temperature is None else temperature,
-                        top_k=self.defaults.top_k if top_k is None else top_k,
-                        top_p=self.defaults.top_p if top_p is None else top_p,
-                        repetition_penalty=(
-                            self.defaults.repetition_penalty
-                            if repetition_penalty is None
-                            else repetition_penalty
-                        ),
-                        rep_penalty_lookback=(
-                            self.defaults.rep_penalty_lookback
-                            if rep_penalty_lookback is None
-                            else rep_penalty_lookback
-                        ),
-                        max_tokens=self.defaults.max_tokens if max_tokens is None else max_tokens,
-                    )
+        process = self._require_running()
+        request_tokens = tuple(token_ids)
+        kv_position = _common_prefix_len(self._cached_token_ids, request_tokens)
+        completed = False
+        generated: list[int] = []
+        try:
+            await self._write_block(
+                _build_request_block(
+                    kv_position=kv_position,
+                    tokens=request_tokens[kv_position:],
+                    temperature=self.defaults.temperature if temperature is None else temperature,
+                    top_k=self.defaults.top_k if top_k is None else top_k,
+                    top_p=self.defaults.top_p if top_p is None else top_p,
+                    repetition_penalty=(
+                        self.defaults.repetition_penalty
+                        if repetition_penalty is None
+                        else repetition_penalty
+                    ),
+                    rep_penalty_lookback=(
+                        self.defaults.rep_penalty_lookback
+                        if rep_penalty_lookback is None
+                        else rep_penalty_lookback
+                    ),
+                    max_tokens=self.defaults.max_tokens if max_tokens is None else max_tokens,
                 )
-                while True:
-                    raw = await self._readline("token_id")
-                    token_id = _parse_protocol_int(raw, "token_id")
-                    generated.append(token_id)
-                    if token_id in self.model.eos_tokens:
-                        break
-                    yield token_id
-                kv_line = await self._readline("kv_position")
-                kv_position = _parse_protocol_int(kv_line, "kv_position")
-                self._prompt_cache.commit(plan, generated, kv_position)
-                prompt_tokens = min(len(plan.request.token_ids), kv_position)
-                self._last_prompt_tokens = prompt_tokens
-                self._last_completion_tokens = max(0, kv_position - prompt_tokens)
-                completed = True
-            except asyncio.CancelledError:
-                self._clear_usage()
-                self._prompt_cache.clear()
-                await self._kill_process()
-                raise
-            except EngineError:
-                self._clear_usage()
-                self._prompt_cache.clear()
-                await self._kill_process()
-                raise
-            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                self._clear_usage()
-                self._prompt_cache.clear()
-                await self._kill_process()
-                raise EngineCrashedError("Inference engine crashed") from exc
-            finally:
-                if not completed:
-                    self._clear_usage()
-                    self._prompt_cache.clear()
-                    if process.returncode is not None:
-                        self.process = None
+            )
+            while True:
+                raw = await self._readline("token_id")
+                token_id = _parse_protocol_int(raw, "token_id")
+                generated.append(token_id)
+                if token_id in self.model.eos_tokens:
+                    break
+                yield token_id
+            kv_line = await self._readline("kv_position")
+            kv_position = _parse_protocol_int(kv_line, "kv_position")
+            combined = request_tokens + tuple(generated)
+            if kv_position < 0 or kv_position > len(combined):
+                raise EngineProtocolError(
+                    f"Invalid kv_position {kv_position}; expected a value between 0 and {len(combined)}"
+                )
+            self._cached_token_ids = combined[:kv_position]
+            completed = True
+        except (asyncio.CancelledError, GeneratorExit):
+            self._cached_token_ids = ()
+            await self._kill_process()
+            raise
+        except EngineError:
+            self._cached_token_ids = ()
+            await self._kill_process()
+            raise
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._cached_token_ids = ()
+            await self._kill_process()
+            raise EngineCrashedError("Inference engine crashed") from exc
+        finally:
+            if not completed:
+                self._cached_token_ids = ()
+                if process.returncode is not None:
+                    self.process = None
 
     def _require_running(self) -> asyncio.subprocess.Process:
         process = self.process
@@ -303,10 +217,6 @@ class InferenceEngine:
             pass
         await process.wait()
         self.process = None
-
-    def _clear_usage(self) -> None:
-        self._last_prompt_tokens = 0
-        self._last_completion_tokens = 0
 
 
 async def _read_stderr(process: asyncio.subprocess.Process) -> str:
@@ -372,8 +282,8 @@ def _first_protocol_line(value: str) -> str:
 
 def _build_request_block(
     *,
-    delta_tokens: Sequence[int],
-    reset_flag: int,
+    kv_position: int,
+    tokens: Sequence[int],
     temperature: float,
     top_k: int,
     top_p: float,
@@ -382,8 +292,8 @@ def _build_request_block(
     max_tokens: int,
 ) -> str:
     pairs = [
-        f"reset={reset_flag}",
-        f"tokens={','.join(str(token_id) for token_id in delta_tokens)}",
+        f"kv_position={kv_position}",
+        f"tokens={','.join(str(token_id) for token_id in tokens)}",
         f"temperature={temperature}",
         f"top_k={top_k}",
         f"top_p={top_p}",
@@ -392,6 +302,14 @@ def _build_request_block(
         f"max_tokens={max_tokens}",
     ]
     return f"{len(pairs)}\n" + "".join(f"{pair}\n" for pair in pairs)
+
+
+def _common_prefix_len(left: Sequence[int], right: Sequence[int]) -> int:
+    shared = 0
+    limit = min(len(left), len(right))
+    while shared < limit and left[shared] == right[shared]:
+        shared += 1
+    return shared
 
 
 def _parse_protocol_int(raw: bytes, field_name: str) -> int:

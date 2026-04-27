@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import io
 import errno
 import os
 import re
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -167,23 +167,71 @@ def validate_voice_state_bytes(state_bytes: bytes) -> bytes:
     return state_bytes
 
 
-def load_safe_voice_state_bytes(state_bytes: bytes):
-    """Safely deserialize one bounded custom-voice state payload."""
+def load_safe_voice_state_safetensors(path: str | Path):
+    """Safely load one bounded Pocket TTS voice state from safetensors."""
     import torch
+    from safetensors.torch import load_file
 
-    payload = validate_voice_state_bytes(state_bytes)
+    voice_path = Path(path)
     try:
-        state = torch.load(
-            io.BytesIO(payload),
-            map_location="cpu",
-            weights_only=True,
-        )
+        stat_result = voice_path.stat()
+    except OSError as exc:
+        raise InvalidRequestError("voice state is malformed") from exc
+    if stat_result.st_size <= 0 or stat_result.st_size > MAX_VOICE_STATE_BYTES:
+        raise InvalidRequestError("voice state is malformed")
+    try:
+        flat_state = load_file(str(voice_path), device="cpu")
     except Exception as exc:
         raise InvalidRequestError("voice state is malformed") from exc
+    state = _unflatten_safetensors_voice_state(flat_state, torch)
+    _validate_loaded_voice_state_value(state, torch)
+    return state
+
+
+def load_safe_voice_state_safetensors_bytes(state_bytes: bytes):
+    """Safely load one bounded Pocket TTS voice state from safetensors bytes."""
+    payload = validate_voice_state_bytes(state_bytes)
+    fd, temp_name = tempfile.mkstemp(suffix=".safetensors")
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        return load_safe_voice_state_safetensors(temp_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def save_voice_state_safetensors(state: dict, path: str | Path) -> None:
+    """Save one Pocket TTS voice state in safetensors format."""
+    import torch
+    from safetensors.torch import save_file
+
     if not isinstance(state, dict) or not state:
         raise InvalidRequestError("voice state is malformed")
     _validate_loaded_voice_state_value(state, torch)
-    return state
+    flat_state = _flatten_safetensors_voice_state(state, torch)
+    try:
+        save_file(flat_state, str(path), metadata={"format": "trillim-pocket-tts-state"})
+    except Exception as exc:
+        raise InvalidRequestError("voice state is malformed") from exc
+
+
+def dump_voice_state_safetensors_bytes(state: dict) -> bytes:
+    """Serialize one Pocket TTS voice state to safetensors bytes."""
+    fd, temp_name = tempfile.mkstemp(suffix=".safetensors")
+    temp_path = Path(temp_name)
+    os.close(fd)
+    try:
+        save_voice_state_safetensors(state, temp_path)
+        return validate_voice_state_bytes(temp_path.read_bytes())
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def validate_source_audio_path(path: str | Path) -> Path:
@@ -272,3 +320,35 @@ def _validate_loaded_voice_state_value(value, torch) -> None:
     if isinstance(value, (str, int, float, bool, type(None))):
         return
     raise InvalidRequestError("voice state is malformed")
+
+
+def _flatten_safetensors_voice_state(state: dict, torch) -> dict[str, object]:
+    flat_state: dict[str, object] = {}
+    for module_name, module_state in state.items():
+        if not isinstance(module_name, str) or "/" in module_name:
+            raise InvalidRequestError("voice state is malformed")
+        if not isinstance(module_state, dict):
+            raise InvalidRequestError("voice state is malformed")
+        for key, tensor in module_state.items():
+            if not isinstance(key, str) or "/" in key:
+                raise InvalidRequestError("voice state is malformed")
+            if not torch.is_tensor(tensor):
+                raise InvalidRequestError("voice state is malformed")
+            flat_state[f"{module_name}/{key}"] = tensor.detach().cpu().contiguous()
+    if not flat_state:
+        raise InvalidRequestError("voice state is malformed")
+    return flat_state
+
+
+def _unflatten_safetensors_voice_state(flat_state: dict, torch) -> dict:
+    if not isinstance(flat_state, dict) or not flat_state:
+        raise InvalidRequestError("voice state is malformed")
+    state: dict[str, dict[str, object]] = {}
+    for flat_key, tensor in flat_state.items():
+        if not isinstance(flat_key, str) or "/" not in flat_key:
+            raise InvalidRequestError("voice state is malformed")
+        module_name, key = flat_key.split("/", 1)
+        if not module_name or not key or not torch.is_tensor(tensor):
+            raise InvalidRequestError("voice state is malformed")
+        state.setdefault(module_name, {})[key] = tensor
+    return state

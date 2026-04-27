@@ -1,1 +1,1 @@
-"""End-to-end server test package."""
+"""E2E tests."""

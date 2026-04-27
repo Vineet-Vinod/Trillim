@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 from trillim.components.tts._limits import (
     HARD_TEXT_SEGMENT_CAP,
+    INTER_SEGMENT_LEADIN,
+    LONG_TOKEN_PLACEHOLDER,
+    LONG_TOKEN_RE,
+    PARAGRAPH_SPLIT_RE,
+    PUNCTUATION_SPLIT_RE,
+    SENTENCE_SPLIT_RE,
     TARGET_TTS_TOKENS,
 )
 
-_PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-_PUNCTUATION_SPLIT_RE = re.compile(r"(?<=[^\w\s])\s+")
-_LONG_TOKEN_RE = re.compile(r"\S{51,}")
-_LONG_TOKEN_PLACEHOLDER = "too-long-word-skipped"
-_INTER_SEGMENT_LEADIN = "  "
+if TYPE_CHECKING:
+    from pocket_tts.conditioners.text import SentencePieceTokenizer
 
 
 def load_pocket_tts_tokenizer() -> SentencePieceTokenizer:
@@ -38,8 +40,8 @@ def load_pocket_tts_tokenizer() -> SentencePieceTokenizer:
 
 def iter_text_segments(text: str, tokenizer) -> Iterator[str]:
     """Yield bounded TTS segments lazily from one validated input string."""
-    sanitized_text = _LONG_TOKEN_RE.sub(_LONG_TOKEN_PLACEHOLDER, text)
-    for paragraph in _split_with(_PARAGRAPH_SPLIT_RE, sanitized_text):
+    sanitized_text = LONG_TOKEN_RE.sub(LONG_TOKEN_PLACEHOLDER, text)
+    for paragraph in _split_with(PARAGRAPH_SPLIT_RE, sanitized_text):
         for segment in _iter_paragraph_segments(paragraph, tokenizer):
             yield _add_leadin(segment, tokenizer)
 
@@ -50,14 +52,14 @@ def count_tts_tokens(text: str, tokenizer) -> int:
 
 
 def _iter_paragraph_segments(paragraph: str, tokenizer) -> Iterator[str]:
-    for sentence in _split_with(_SENTENCE_SPLIT_RE, paragraph):
+    for sentence in _split_with(SENTENCE_SPLIT_RE, paragraph):
         sentence = " ".join(sentence.split())
         if not sentence:
             continue
         if _fits_segment_limits(sentence, tokenizer):
             yield sentence
             continue
-        punctuation_units = _split_with(_PUNCTUATION_SPLIT_RE, sentence)
+        punctuation_units = _split_with(PUNCTUATION_SPLIT_RE, sentence)
         if len(punctuation_units) > 1:
             yield from _iter_grouped_segments(punctuation_units, tokenizer)
             continue
@@ -72,7 +74,7 @@ def _fits_segment_limits(text: str, tokenizer) -> bool:
 
 
 def _add_leadin(text: str, tokenizer) -> str:
-    candidate = f"{_INTER_SEGMENT_LEADIN}{text}"
+    candidate = f"{INTER_SEGMENT_LEADIN}{text}"
     if _fits_segment_limits(candidate, tokenizer):
         return candidate
     return text
@@ -144,5 +146,5 @@ def _slice_long_word(word: str) -> list[str]:
     ]
 
 
-def _split_with(pattern: re.Pattern[str], text: str) -> list[str]:
+def _split_with(pattern, text: str) -> list[str]:
     return [piece.strip() for piece in pattern.split(text) if piece.strip()]
