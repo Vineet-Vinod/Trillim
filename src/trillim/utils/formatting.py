@@ -10,6 +10,7 @@ def human_size(size_bytes: int) -> str:
         if size < 1024:
             if unit == "B":
                 return f"{size:.0f} {unit}"
-            return f"{size:.1f} {unit}".rstrip("0").rstrip(".")
+            formatted = f"{size:.1f}".rstrip("0").rstrip(".")
+            return f"{formatted} {unit}"
         size /= 1024
     return f"{size:.1f} PB"
