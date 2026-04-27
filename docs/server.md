@@ -39,8 +39,7 @@ trillim serve Trillim/BitNet-TRNQ --voice
 from trillim import LLM, Server
 
 server = Server(
-    LLM("Trillim/BitNet-TRNQ"),
-    allow_hot_swap=True,
+    LLM("Trillim/BitNet-TRNQ", allow_hot_swap=True),
 )
 server.run(host="127.0.0.1", port=8000)
 ```
@@ -49,8 +48,8 @@ server.run(host="127.0.0.1", port=8000)
 
 | Route | Method | Purpose |
 | --- | --- | --- |
-| `/healthz` | `GET` | readiness and component health |
-| `/v1/models` | `GET` | active model metadata |
+| `/healthz` | `GET` | app liveness |
+| `/v1/models` | `GET` | active model ID |
 | `/v1/chat/completions` | `POST` | OpenAI-compatible chat completions |
 | `/v1/models/swap` | `POST` | optional hot-swap route |
 | `/v1/audio/transcriptions` | `POST` | optional STT route |
@@ -63,46 +62,23 @@ There is no `/v1/completions` route in this implementation.
 
 ## `GET /healthz`
 
-Returns `200` when all composed components are healthy:
+Returns `200` when the app is alive:
 
 ```json
 {"status": "ok"}
 ```
 
-If an LLM component is not in the `running` state, the server returns `503` and includes the component state:
-
-```json
-{
-  "status": "degraded",
-  "components": {
-    "llm": {
-      "state": "swapping"
-    }
-  }
-}
-```
-
 ## `GET /v1/models`
 
-Returns truthful metadata for the active runtime:
+Returns the active model ID in OpenAI-style list form:
 
 ```json
 {
   "object": "list",
-  "state": "running",
   "data": [
     {
       "id": "BitNet-TRNQ",
-      "object": "model",
-      "path": "/Users/you/.trillim/models/Trillim/BitNet-TRNQ",
-      "max_context_tokens": 4096,
-      "trust_remote_code": false,
-      "adapter_path": null,
-      "init_config": {
-        "num_threads": 0,
-        "lora_quant": null,
-        "unembed_quant": null
-      }
+      "object": "model"
     }
   ]
 }
@@ -220,6 +196,7 @@ Important behavior:
 - Omitted init-time fields reset to Trillim defaults. They do not inherit the previous runtime's values.
 - The effective search token budget is clamped to one quarter of the active model context window.
 - Existing chat sessions become stale once swap handoff begins.
+- The current implementation stops the old engine before starting the replacement engine. If replacement startup fails, the LLM becomes unavailable until restarted.
 - `search_provider: "brave"` requires `SEARCH_API_KEY` in the server environment.
 
 ## Voice Routes

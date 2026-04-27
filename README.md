@@ -48,10 +48,9 @@ Use the Python SDK synchronously through `Runtime`:
 from trillim import LLM, Runtime
 
 with Runtime(LLM("Trillim/BitNet-TRNQ")) as runtime:
-    reply = runtime.llm.chat(
-        [{"role": "user", "content": "Give me one sentence about local CPU inference."}]
-    )
-    print(reply)
+    with runtime.llm.open_session() as session:
+        reply = session.collect("Give me one sentence about local CPU inference.")
+        print(reply)
 ```
 
 ## Common Workflows

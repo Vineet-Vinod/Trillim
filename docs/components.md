@@ -19,10 +19,9 @@ Trillim exposes both patterns:
 from trillim import LLM, Runtime
 
 with Runtime(LLM("Trillim/BitNet-TRNQ")) as runtime:
-    reply = runtime.llm.chat(
-        [{"role": "user", "content": "Explain local inference in one sentence."}]
-    )
-    print(reply)
+    with runtime.llm.open_session() as session:
+        reply = session.collect("Explain local inference in one sentence.")
+        print(reply)
 ```
 
 `Runtime` exposes composed components by name:
@@ -38,13 +37,12 @@ from trillim import LLM, Runtime
 from trillim.components.llm import ChatTokenEvent, ChatDoneEvent
 
 with Runtime(LLM("Trillim/BitNet-TRNQ")) as runtime:
-    for event in runtime.llm.stream_chat(
-        [{"role": "user", "content": "Write five words about CPUs."}]
-    ):
-        if isinstance(event, ChatTokenEvent):
-            print(event.text, end="", flush=True)
-        elif isinstance(event, ChatDoneEvent):
-            print(f"\nused {event.usage.total_tokens} tokens")
+    with runtime.llm.open_session() as session:
+        for event in session.generate("Write five words about CPUs."):
+            if isinstance(event, ChatTokenEvent):
+                print(event.text, end="", flush=True)
+            elif isinstance(event, ChatDoneEvent):
+                print(f"\nused {event.usage.total_tokens} tokens")
 ```
 
 ## Use `LLM` Directly for Async Code
@@ -59,10 +57,9 @@ async def main():
     llm = LLM("Trillim/BitNet-TRNQ")
     await llm.start()
     try:
-        reply = await llm.chat(
-            [{"role": "user", "content": "Name two benefits of local models."}]
-        )
-        print(reply)
+        async with llm.open_session() as session:
+            reply = await session.collect("Name two benefits of local models.")
+            print(reply)
     finally:
         await llm.stop()
 
@@ -97,14 +94,13 @@ Useful constructor options:
 | `search_provider` | `ddgs` or `brave` |
 | `search_token_budget` | Search-context budget; clamped at runtime to one quarter of the active model context window |
 
-### One-Turn Calls vs Sessions
+### One-Turn Calls and Sessions
 
-Use the one-turn helpers when you already have the full message list:
+The current SDK exposes LLM generation through `ChatSession`. For a one-turn call, open a session and call `collect(user_message)`. For streaming, iterate `generate(user_message)`.
 
-- `await llm.chat(messages)`
-- `async for event in llm.stream_chat(messages): ...`
+Use `append_message(role, content)` to preload system, user, assistant, or search context before the next generated user turn.
 
-Use `open_session()` when you want multi-turn state:
+Use the same session when you want multi-turn state:
 
 ```python
 import asyncio
@@ -116,14 +112,10 @@ async def main():
     llm = LLM("Trillim/BitNet-TRNQ")
     await llm.start()
     try:
-        async with llm.open_session(
-            [{"role": "system", "content": "Be concise."}]
-        ) as session:
-            session.add_user("Give me three uses for local AI.")
-            print(await session.chat())
-
-            session.add_user("Now shorten that to one sentence.")
-            print(await session.chat())
+        async with llm.open_session() as session:
+            session.append_message("system", "Be concise.")
+            print(await session.collect("Give me three uses for local AI."))
+            print(await session.collect("Now shorten that to one sentence."))
     finally:
         await llm.stop()
 
@@ -134,37 +126,16 @@ asyncio.run(main())
 Session rules that matter in real code:
 
 - `ChatSession` is created by `LLM.open_session()`. You do not construct it yourself.
+- `open_session()` does not take initial messages. Add existing context with `append_message()`.
+- `collect(user_message)` returns the final assistant string.
+- `generate(user_message)` yields `ChatTokenEvent`, `ChatFinalTextEvent`, and `ChatDoneEvent`.
+- `new_chat()` clears committed conversation history on an idle session.
 - A session is single-consumer. Do not iterate and mutate it concurrently.
 - When a model swap begins, existing chat sessions become stale and raise `SessionStaleError`.
 - A closed session raises `SessionClosedError` if reused.
 - Very long-lived sessions can hit the lifetime token cap and raise `SessionExhaustedError`.
 
-### Inspect the Active Runtime
-
-`model_info()` is the truthful snapshot of the active runtime:
-
-```python
-import asyncio
-
-from trillim import LLM
-
-
-async def main():
-    llm = LLM("Trillim/BitNet-TRNQ", lora_dir="Trillim/BitNet-GenZ-LoRA-TRNQ")
-    await llm.start()
-    try:
-        info = llm.model_info()
-        print(info.state)
-        print(info.name)
-        print(info.max_context_tokens)
-        print(info.adapter_path)
-        print(info.init_config)
-    finally:
-        await llm.stop()
-
-
-asyncio.run(main())
-```
+Final practical note: avoid keeping multiple active `ChatSession` objects open from the same `LLM` component. The underlying inference engine only caches the latest chat thread. Alternating between sessions will constantly evict and rebuild that cache, which is slow and can make generation hit progress timeouts on CPU-bound machines. Prefer one live chat session per `LLM`, or run independent conversations through separate `LLM` components when isolation matters.
 
 ### Enable Search
 
@@ -198,12 +169,12 @@ async def main():
     llm = LLM("Trillim/BitNet-TRNQ")
     await llm.start()
     try:
-        info = await llm.swap_model(
+        await llm.swap_model(
             "Trillim/BitNet-TRNQ",
             lora_dir="Trillim/BitNet-GenZ-LoRA-TRNQ",
         )
-        print(info.name)
-        print(info.adapter_path)
+        async with llm.open_session() as session:
+            print(await session.collect("Confirm the adapter is active."))
     finally:
         await llm.stop()
 
@@ -214,8 +185,9 @@ asyncio.run(main())
 Important hot-swap behavior:
 
 - The component must already be running.
-- Concurrent swap requests fail fast instead of queueing behind an in-flight preflight or handoff.
+- HTTP swap requests fail fast when the LLM route is already handling work. Direct SDK calls are serialized by the component locks.
 - Existing sessions become stale once swap handoff begins.
+- The current implementation stops the old engine before starting the replacement engine. If replacement startup fails, the LLM becomes unavailable until restarted or swapped again.
 - `stop()` wins over in-flight startup, hot swap, and recovery restart work; if shutdown races with replacement-model preflight or handoff, Trillim discards that work and leaves the component `unavailable`.
 - Omitted init-time options reset to Trillim defaults instead of inheriting the previous runtime.
 
@@ -250,7 +222,7 @@ Public helpers:
 
 Practical notes:
 
-- `AudioSession` is created by `STT.open_session()`. You do not construct it directly.
+- `STTSession` is created by `STT.open_session()`. You do not construct it directly.
 - `session.transcribe()` accepts signed 16-bit little-endian mono `16 kHz` PCM bytes or WAV that Trillim converts to that PCM format.
 - `language` is optional and must contain only letters and hyphens.
 - `STT` serializes engine use to one transcription at a time. SDK callers queue cooperatively behind that slot instead of failing fast.

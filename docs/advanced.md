@@ -14,22 +14,15 @@ What that means in practice:
 
 This is why sync control operations still behave cooperatively rather than magically interrupting work mid-step.
 
-## Truthful Runtime Metadata
+## Runtime Metadata
 
-Trillim tries hard to keep runtime state truthful rather than convenient.
+The current public SDK keeps LLM runtime introspection small. `LLM.open_session()` is the main readiness check for SDK callers: it succeeds only while the component is running and raises `ComponentLifecycleError` otherwise.
 
-For `LLM`:
-
-- `model_info()` is the authoritative runtime snapshot
-- `model_info()` reports the active model name, path, adapter path, trust setting, and active init-time worker options
-- `LLM.max_context_tokens` is only defined while a model is active
-- adapter identity is exposed separately through `adapter_path`; it is not folded into `model_info().name`
-
-If you are building dashboards, admin routes, or tooling, prefer `model_info()` over cached assumptions.
+The HTTP server exposes the active model ID through `GET /v1/models`. It does not currently return adapter paths, context-window size, trust settings, or worker init options.
 
 ## Session Handles
 
-`ChatSession` and `TTSSession` are live handles, not plain value objects.
+`ChatSession`, `STTSession`, and `TTSSession` are live handles, not plain value objects.
 
 Important rules:
 
@@ -41,19 +34,29 @@ Important rules:
 
 ### `ChatSession` States
 
-- `open`
+- `idle`
 - `streaming`
-- `closed`
-- `exhausted`
+- `done`
 - `stale`
-- `failed`
-- `owner_stopped`
 
 Important implications:
 
 - a session becomes `stale` when an LLM swap actually begins handoff after preflight succeeds
-- a session becomes `exhausted` when its lifetime token quota is consumed
+- a session becomes `done` after `close()`, cancellation, hard engine failure, or lifetime-token exhaustion
 - `close()` waits for active-turn cleanup before returning
+
+### `STTSession` States
+
+- `idle`
+- `transcribing`
+- `done`
+
+Important implications:
+
+- `transcribe(audio, language=None)` starts one transcription turn
+- a session is single-use after transcription starts; it moves to `done` when the turn finishes or fails
+- `close()` is currently a no-op because STT does not expose caller-visible streaming state
+- stopped owner components surface as `ComponentLifecycleError`
 
 ### `TTSSession` States
 
@@ -104,7 +107,7 @@ Operational limits:
 - max search fetch rounds per request: `2`
 - supported providers: `ddgs`, `brave`
 - results per search: `5`
-- runtime search token budget is clamped to `max_context_tokens // 4`
+- runtime search token budget is clamped to one quarter of the active model context window
 
 `brave` requires `SEARCH_API_KEY` in the environment.
 
@@ -115,14 +118,13 @@ Hot swap is designed to preserve correctness first.
 Important rules:
 
 - swap can change the base model, adapter, and search/runtime options together
-- replacement-model preflight and setup may happen while the current model is still serving
-- concurrent swap requests fail fast; they are not queued behind an in-flight preflight or handoff
+- HTTP swap requests fail fast when the LLM route is already handling work; direct SDK swaps are serialized by component locks
+- the current implementation stops the old engine before starting the replacement engine to avoid overlapping model memory
 - once swap handoff begins, existing chat sessions become stale
 - `stop()` is authoritative across startup, hot swap, and recovery restart; if stop wins a race, any preflighted or partially started replacement runtime is discarded and the component remains `unavailable`
 - omitted or `null` init-time swap fields reset to Trillim defaults rather than inheriting the previous runtime's values
-- recovery swaps may be issued from `server_error`
 
-If you expose `/v1/models/swap`, design your callers around session invalidation and truthful post-swap introspection.
+If you expose `/v1/models/swap`, design your callers around session invalidation and verify the active model ID with `/v1/models` after a successful swap.
 
 ## Adapter Overlay Rules
 

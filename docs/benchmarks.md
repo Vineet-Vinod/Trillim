@@ -153,7 +153,7 @@ At minimum, report:
 
 ## Benchmark the SDK
 
-This example measures end-to-end wall time for repeated one-turn calls through the sync `Runtime` facade:
+This example measures end-to-end wall time for repeated one-turn calls through the sync `Runtime` facade. It does not run extra warmups, so consumer laptops are less likely to throttle before the measured runs start.
 
 ```python
 import statistics
@@ -161,18 +161,16 @@ import time
 
 from trillim import LLM, Runtime
 
-PROMPT = [{"role": "user", "content": "Explain CPU inference in one sentence."}]
+PROMPT = "Explain CPU inference in one sentence."
 
 
 def run_trials(model_id: str, *, trials: int = 5) -> None:
     durations = []
     with Runtime(LLM(model_id)) as runtime:
-        for _ in range(2):
-            runtime.llm.chat(PROMPT)
-
         for _ in range(trials):
             start = time.perf_counter()
-            runtime.llm.chat(PROMPT)
+            with runtime.llm.open_session() as session:
+                session.collect(PROMPT)
             durations.append(time.perf_counter() - start)
 
     print("runs:", [round(value, 3) for value in durations])
@@ -183,7 +181,7 @@ def run_trials(model_id: str, *, trials: int = 5) -> None:
 run_trials("Trillim/BitNet-TRNQ")
 ```
 
-If you want first-token timing instead of full-response timing, benchmark `stream_chat(...)` and stop the timer on the first `ChatTokenEvent`.
+If you want first-token timing instead of full-response timing, benchmark `ChatSession.generate(...)` and stop the timer on the first `ChatTokenEvent`.
 
 ## Benchmark Streaming First-Token Latency
 
@@ -193,14 +191,15 @@ import time
 from trillim import LLM, Runtime
 from trillim.components.llm import ChatTokenEvent
 
-PROMPT = [{"role": "user", "content": "Give me a short answer about CPUs."}]
+PROMPT = "Give me a short answer about CPUs."
 
 with Runtime(LLM("Trillim/BitNet-TRNQ")) as runtime:
-    start = time.perf_counter()
-    for event in runtime.llm.stream_chat(PROMPT):
-        if isinstance(event, ChatTokenEvent) and event.text:
-            print("first_token_seconds:", round(time.perf_counter() - start, 3))
-            break
+    with runtime.llm.open_session() as session:
+        start = time.perf_counter()
+        for event in session.generate(PROMPT):
+            if isinstance(event, ChatTokenEvent) and event.text:
+                print("first_token_seconds:", round(time.perf_counter() - start, 3))
+                break
 ```
 
 ## Benchmark the Server
