@@ -6,7 +6,7 @@ import abc
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
-from trillim.components.llm._events import ChatEvent, ChatTokenEvent
+from trillim.components.llm._events import ChatEvent
 
 if TYPE_CHECKING:
     from trillim.components.llm.public import LLM, _RuntimeSnapshot
@@ -58,16 +58,6 @@ class _Harness(abc.ABC):
                 yield token_id
         finally:
             await stream.aclose()
-
-    async def stream_text(
-        self,
-        session: _ChatSession,
-        **sampling: Any,
-    ) -> AsyncIterator[str]:
-        """Yield only text fragments from structured harness events."""
-        async for event in self.stream_events(session, **sampling):
-            if isinstance(event, ChatTokenEvent):
-                yield event.text
 
     @abc.abstractmethod
     async def stream_events(

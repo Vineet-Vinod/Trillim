@@ -260,7 +260,6 @@ class _ChatSession(ChatSession):
         content = validate_user_message(user_message)
         self._llm._require_owner_loop()
         self._ensure_idle()
-        rollback_message_count = len(self._messages)
         self._messages.append({"role": "user", "content": content})
         self._state = _ChatSessionFSM.STREAMING
         self._active_task = asyncio.current_task()
@@ -282,11 +281,11 @@ class _ChatSession(ChatSession):
                 yield event
                 if self._close_requested:
                     await event_stream.aclose()
-                    del self._messages[rollback_message_count:]
+                    self._rollback_messages()
                     self._state = _ChatSessionFSM.DONE
                     return
             if self._close_requested:
-                del self._messages[rollback_message_count:]
+                self._rollback_messages()
                 self._state = _ChatSessionFSM.DONE
                 return
             if self._messages[-1]["role"] != "assistant":
@@ -313,31 +312,31 @@ class _ChatSession(ChatSession):
         except (asyncio.CancelledError, GeneratorExit):
             if self._active_event_stream is not None:
                 await self._active_event_stream.aclose()
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.DONE
             raise
         except SearchAuthenticationError as exc:
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.IDLE
             raise RuntimeError(str(exc)) from exc
         except ContextOverflowError:
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.IDLE
             raise
         except SessionExhaustedError:
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.DONE
             raise
         except EngineProgressTimeoutError as exc:
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.DONE
             raise ProgressTimeoutError(str(exc)) from exc
         except (EngineCrashedError, EngineError) as exc:
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.DONE
             raise RuntimeError(str(exc)) from exc
         except Exception:
-            del self._messages[rollback_message_count:]
+            self._rollback_messages()
             self._state = _ChatSessionFSM.DONE
             raise
         finally:
@@ -464,6 +463,9 @@ class _ChatSession(ChatSession):
                 continue
             rendered.append(message)
         return rendered
+
+    def _rollback_messages(self) -> None:
+        del self._messages[self._messages_in_kv :]
 
     def _ensure_idle(self) -> None:
         if self._is_stale():

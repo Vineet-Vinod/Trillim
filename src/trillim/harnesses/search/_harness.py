@@ -25,13 +25,14 @@ class _SearchHarness(_Harness):
 
     def __init__(
         self,
-        engine,
+        llm,
+        runtime,
         *,
         search_provider: str,
         search_token_budget: int,
         _search_client_factory=SearchClient,
     ) -> None:
-        super().__init__(engine)
+        super().__init__(llm, runtime)
         self._search = _search_client_factory(
             provider_name=search_provider,
             token_budget=search_token_budget,
@@ -46,23 +47,23 @@ class _SearchHarness(_Harness):
         """Run buffered search iterations, then stream the final answer."""
         self._reset_usage()
         metrics = SearchMetrics()
-        working_messages = [message.copy() for message in session.messages]
         for _ in range(MAX_SEARCH_ITERATIONS - 1):
-            token_ids = session._prepare_generation(messages=working_messages)
-            full_text = await self._generate_buffered(
+            cached_tokens = session.cached_token_count
+            token_ids = session._prepare_generation(messages=session._messages)
+            full_text, completion_token_ids = await self._generate_buffered(
+                session,
                 token_ids,
                 **sampling,
             )
             query = extract_search_query(full_text)
+            metrics.record_generation(
+                prompt_tokens=len(token_ids) - cached_tokens,
+                completion_tokens=len(completion_token_ids),
+            )
             if query is None:
-                metrics.record_generation(
-                    prompt_tokens=self._engine.last_prompt_tokens,
-                    completion_tokens=self._engine.last_completion_tokens,
-                    cached_tokens=self._engine.last_cache_hit,
-                )
                 self._apply_metrics(metrics)
-                working_messages.append({"role": "assistant", "content": full_text})
-                session._commit_messages(working_messages)
+                session._messages.append({"role": "assistant", "content": full_text})
+                session._pending_token_ids = (*token_ids, *completion_token_ids)
                 if full_text:
                     yield ChatTokenEvent(text=full_text)
                 yield ChatFinalTextEvent(text=full_text)
@@ -76,43 +77,58 @@ class _SearchHarness(_Harness):
                 search_content = FALLBACK_SEARCH_FAILURE_MESSAGE
             if search_content != FALLBACK_SEARCH_FAILURE_MESSAGE:
                 search_content = self._trim_search_content(search_content)
-            working_messages.append({"role": "assistant", "content": full_text})
-            working_messages.append({"role": "search", "content": search_content})
+            session._messages.append({"role": "assistant", "content": full_text})
+            session._cached_token_ids = (*token_ids, *completion_token_ids)
+            session._messages_in_kv = len(session._messages)
+            session._messages.append({"role": "search", "content": search_content})
 
-        token_ids = session._prepare_generation(messages=working_messages)
+        cached_tokens = session.cached_token_count
+        token_ids = session._prepare_generation(messages=session._messages)
         decoder = IncrementalDecoder(self.tokenizer)
         full_text = ""
-        async for token_id in self._engine.generate(token_ids=token_ids, **sampling):
-            chunk = decoder.decode(token_id)
-            if not chunk:
-                continue
-            full_text += chunk
-            yield ChatTokenEvent(text=chunk)
+        completion_token_ids: list[int] = []
+        token_stream = self._generate_tokens(session, token_ids, **sampling)
+        try:
+            async for token_id in token_stream:
+                completion_token_ids.append(token_id)
+                chunk = decoder.decode(token_id)
+                if not chunk:
+                    continue
+                full_text += chunk
+                yield ChatTokenEvent(text=chunk)
+        finally:
+            await token_stream.aclose()
         chunk = decoder.flush()
         if chunk:
             full_text += chunk
             yield ChatTokenEvent(text=chunk)
         metrics.record_generation(
-            prompt_tokens=self._engine.last_prompt_tokens,
-            completion_tokens=self._engine.last_completion_tokens,
-            cached_tokens=self._engine.last_cache_hit,
+            prompt_tokens=len(token_ids) - cached_tokens,
+            completion_tokens=len(completion_token_ids),
         )
         self._apply_metrics(metrics)
-        working_messages.append({"role": "assistant", "content": full_text})
-        session._commit_messages(working_messages)
+        session._messages.append({"role": "assistant", "content": full_text})
+        session._pending_token_ids = (*token_ids, *completion_token_ids)
         yield ChatFinalTextEvent(text=full_text)
 
     async def _generate_buffered(
         self,
+        session: _ChatSession,
         token_ids: list[int],
         **sampling: Any,
-    ) -> str:
+    ) -> tuple[str, list[int]]:
         decoder = IncrementalDecoder(self.tokenizer)
         full_text = ""
-        async for token_id in self._engine.generate(token_ids=token_ids, **sampling):
-            full_text += decoder.decode(token_id)
+        completion_token_ids: list[int] = []
+        token_stream = self._generate_tokens(session, token_ids, **sampling)
+        try:
+            async for token_id in token_stream:
+                completion_token_ids.append(token_id)
+                full_text += decoder.decode(token_id)
+        finally:
+            await token_stream.aclose()
         full_text += decoder.flush()
-        return full_text
+        return full_text, completion_token_ids
 
     def _trim_search_content(self, content: str) -> str:
         token_ids = list(
@@ -131,4 +147,3 @@ class _SearchHarness(_Harness):
     def _apply_metrics(self, metrics: SearchMetrics) -> None:
         self._prompt_tokens = metrics.prompt_tokens
         self._completion_tokens = metrics.completion_tokens
-        self._cached_tokens = metrics.cached_tokens
