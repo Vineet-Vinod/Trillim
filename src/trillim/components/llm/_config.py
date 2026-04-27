@@ -4,20 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from enum import IntEnum, StrEnum
+from enum import IntEnum
 from pathlib import Path
 
 from trillim.components.llm._limits import DEFAULT_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS
-
-
-class LLMState(StrEnum):
-    """Externally visible LLM runtime state."""
-
-    RUNNING = "running"
-    DRAINING = "draining"
-    SWAPPING = "swapping"
-    SERVER_ERROR = "server_error"
-    UNAVAILABLE = "unavailable"
 
 
 class ArchitectureType(IntEnum):
@@ -87,25 +77,13 @@ class SamplingDefaults:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeInitInfo:
-    """Public snapshot of active init-time worker options."""
+class _HarnessConfig:
+    """Internal harness settings captured with one runtime."""
 
-    num_threads: int = 0
-    lora_quant: str | None = None
-    unembed_quant: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ModelInfo:
-    """Public snapshot of the active LLM runtime state."""
-
-    state: LLMState
-    name: str | None
-    path: str | None
-    max_context_tokens: int | None
-    trust_remote_code: bool
-    adapter_path: str | None = None
-    init_config: RuntimeInitInfo | None = None
+    name: str
+    search_provider: str
+    search_token_budget: int
+    requested_search_token_budget: int
 
 
 def load_sampling_defaults(model_dir: Path) -> SamplingDefaults:

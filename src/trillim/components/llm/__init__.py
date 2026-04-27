@@ -1,6 +1,5 @@
 """Public LLM exports."""
 
-from trillim.components.llm._config import ModelInfo
 from trillim.components.llm._events import (
     ChatDoneEvent,
     ChatEvent,
@@ -19,5 +18,4 @@ __all__ = [
     "ChatTokenEvent",
     "ChatUsage",
     "LLM",
-    "ModelInfo",
 ]

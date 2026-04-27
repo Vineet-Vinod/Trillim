@@ -8,7 +8,7 @@ from typing import Literal, TypeAlias
 
 @dataclass(slots=True, frozen=True)
 class ChatUsage:
-    """Usage accounting for a completed chat turn."""
+    """Session-level usage accounting for a completed chat turn."""
 
     prompt_tokens: int
     completion_tokens: int
