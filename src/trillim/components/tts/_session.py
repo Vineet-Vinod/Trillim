@@ -168,6 +168,7 @@ class _TTSSession(TTSSession):
         self._task: asyncio.Task | None = None
         self._error: Exception | None = None
         self._stream_active = False
+        self._cancel_requested = False
 
     @property
     def state(self) -> str:
@@ -202,7 +203,7 @@ class _TTSSession(TTSSession):
 
     async def set_voice(self, voice: str) -> None:
         self._raise_if_busy("voice")
-        self._voice, _voice_state = await self._tts._configure_voice(voice)
+        self._voice, _voice_state = self._tts._configure_voice(voice)
 
     async def set_speed(self, speed: float) -> None:
         self._speed = validate_speed(speed)
@@ -225,12 +226,13 @@ class _TTSSession(TTSSession):
         self._clear_queue()
         self._error = None
         self._task = None
+        self._cancel_requested = False
         self._done_event.clear()
         self._resume_event.set()
         self._state = _TTSSessionFSM.RUNNING
         try:
             voice = self._voice
-            self._voice, voice_state = await self._tts._configure_voice(voice)
+            self._voice, voice_state = self._tts._configure_voice(voice)
             self._task = asyncio.create_task(
                 self._produce(text, voice_state=voice_state)
             )
@@ -245,7 +247,9 @@ class _TTSSession(TTSSession):
                     continue
                 if self._done_event.is_set():
                     self._state = (
-                        _TTSSessionFSM.DONE
+                        _TTSSessionFSM.IDLE
+                        if self._cancel_requested
+                        else _TTSSessionFSM.DONE
                         if self._error is None
                         else _TTSSessionFSM.IDLE
                     )
@@ -261,6 +265,7 @@ class _TTSSession(TTSSession):
             elif not self._done_event.is_set():
                 await self._cancel_active()
             self._stream_active = False
+            self._cancel_requested = False
 
     async def _produce(self, text: str, *, voice_state: object) -> None:
         try:
@@ -292,12 +297,13 @@ class _TTSSession(TTSSession):
             await self._finish(_TTSSessionFSM.IDLE, exc)
 
     async def _cancel_active(self) -> None:
+        self._cancel_requested = True
         task = self._task
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         await self._finish(
-            _TTSSessionFSM.DONE,
+            _TTSSessionFSM.IDLE,
             None,
             clear_queue=True,
         )
