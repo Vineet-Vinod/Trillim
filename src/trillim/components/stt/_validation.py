@@ -10,7 +10,7 @@ _LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z]{2,8})*$")
 
 
 class PayloadTooLargeError(InvalidRequestError):
-    pass
+    """Raised when a bounded STT payload exceeds its byte cap."""
 
 
 @dataclass(frozen=True, slots=True)
