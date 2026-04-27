@@ -73,8 +73,8 @@ class TTS(Component):
 
     async def start(self) -> None:
         """Start PocketTTS and initialize voice storage."""
+        self._require_owner_loop()
         async with self._lifecycle_lock:
-            self._require_owner_loop()
             if self._started:
                 return
             importlib.import_module("numpy")
@@ -158,7 +158,7 @@ class TTS(Component):
         deleted_name = await delete_custom_voice(VOICE_STORE_ROOT, name=normalized_name)
         return deleted_name
 
-    async def open_session(
+    def open_session(
         self,
         *,
         voice: str | None = None,
@@ -173,14 +173,14 @@ class TTS(Component):
             else normalize_optional_name(voice, field_name="voice")
         )
         assert resolved_voice is not None
-        resolved_voice, _voice_state = await self._configure_voice(resolved_voice)
+        resolved_voice, _voice_state = self._configure_voice(resolved_voice)
         return _create_tts_session(
             self,
             voice=resolved_voice,
             speed=DEFAULT_SPEED if speed is None else validate_speed(speed),
         )
 
-    async def _configure_voice(self, voice: str) -> tuple[str, str | dict]:
+    def _configure_voice(self, voice: str) -> tuple[str, str | dict]:
         self._require_owner_loop()
         self._require_started()
         normalized = normalize_required_name(voice, field_name="voice")
