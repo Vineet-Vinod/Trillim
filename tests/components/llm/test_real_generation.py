@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from trillim.components.llm._engine import InferenceEngine
 from trillim.components.llm._events import ChatDoneEvent, ChatFinalTextEvent, ChatTokenEvent
 from trillim.components.llm._model_dir import validate_model_dir
 from trillim.components.llm.public import LLM, load_tokenizer
+from trillim.errors import ComponentLifecycleError
 
 
 BONSAI_MODEL_ID = "Trillim/Bonsai-1.7B-TRNQ"
@@ -83,6 +85,67 @@ class RealLLMGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(usage)
         self.assertEqual(usage.completion_tokens, 1)
         self.assertEqual(cached_tokens, usage.total_tokens)
+
+    async def test_bonsai_session_public_api_is_bound_to_owner_loop(self):
+        llm = LLM(BONSAI_MODEL_ID)
+        await llm.start()
+        try:
+            session = llm.open_session()
+
+            async def read_state_from_thread() -> None:
+                _state = session.state
+
+            async def read_messages_from_thread() -> None:
+                _messages = session.messages
+
+            async def read_cached_count_from_thread() -> None:
+                _cached_token_count = session.cached_token_count
+
+            async def enter_session_from_thread() -> None:
+                await session.__aenter__()
+
+            async def exit_session_from_thread() -> None:
+                await session.__aexit__(None, None, None)
+
+            async def close_session_from_thread() -> None:
+                await session.close()
+
+            async def append_message_from_thread() -> None:
+                session.append_message("system", "Be concise.")
+
+            async def generate_from_thread() -> None:
+                async for _event in session.generate("hello", max_tokens=1):
+                    pass
+
+            async def collect_from_thread() -> None:
+                await session.collect("hello", max_tokens=1)
+
+            async def new_chat_from_thread() -> None:
+                session.new_chat()
+
+            async def run_on_new_loop(operation) -> None:
+                def run() -> None:
+                    asyncio.run(operation())
+
+                await asyncio.to_thread(run)
+
+            for operation in (
+                read_state_from_thread,
+                read_messages_from_thread,
+                read_cached_count_from_thread,
+                enter_session_from_thread,
+                exit_session_from_thread,
+                close_session_from_thread,
+                append_message_from_thread,
+                generate_from_thread,
+                collect_from_thread,
+                new_chat_from_thread,
+            ):
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
+                        await run_on_new_loop(operation)
+        finally:
+            await llm.stop()
 
     async def test_bonsai_search_harness_no_tool_path_uses_generation_lane(self):
         llm = LLM(BONSAI_MODEL_ID, harness_name="search")

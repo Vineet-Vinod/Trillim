@@ -222,7 +222,7 @@ For TTS specifically:
 
 - the HTTP TTS routes enforce single-request admission across speech and voice-management requests and reject concurrent requests with `429`
 - the SDK path allows multiple sessions, but all engine calls are serialized by the owning `TTS` instance
-- direct async `TTS` use is bound to one event loop; create one component instance per thread or event loop
+- direct async `TTS` and `TTSSession` use is bound to one event loop; create one component instance per thread or event loop
 
 This is why a timeout in Trillim often implies worker recovery, not just a raised error.
 

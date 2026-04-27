@@ -87,14 +87,51 @@ class PublicSTTTests(unittest.IsolatedAsyncioTestCase):
         stt = STT()
         await stt.start()
         try:
+            session = stt.open_session()
+
+            async def run_on_new_loop(operation) -> None:
+                def run() -> None:
+                    asyncio.run(operation())
+
+                await asyncio.to_thread(run)
+
+            async def start_from_thread() -> None:
+                await stt.start()
+
             with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
-                await asyncio.to_thread(asyncio.run, stt.start())
+                await run_on_new_loop(start_from_thread)
 
             async def open_session_from_thread() -> None:
                 stt.open_session()
 
             with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
-                await asyncio.to_thread(asyncio.run, open_session_from_thread())
+                await run_on_new_loop(open_session_from_thread)
+
+            async def read_state_from_thread() -> None:
+                _state = session.state
+
+            async def enter_session_from_thread() -> None:
+                await session.__aenter__()
+
+            async def exit_session_from_thread() -> None:
+                await session.__aexit__(None, None, None)
+
+            async def close_session_from_thread() -> None:
+                await session.close()
+
+            async def transcribe_from_thread() -> None:
+                await session.transcribe(self.fixture_bytes)
+
+            for operation in (
+                read_state_from_thread,
+                enter_session_from_thread,
+                exit_session_from_thread,
+                close_session_from_thread,
+                transcribe_from_thread,
+            ):
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
+                        await run_on_new_loop(operation)
         finally:
             await stt.stop()
 

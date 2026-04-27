@@ -268,14 +268,86 @@ class PublicTTSTests(unittest.IsolatedAsyncioTestCase):
     async def test_direct_async_use_is_bound_to_one_event_loop(self):
         tts = await self._start_tts()
         try:
+            session = tts.open_session()
+
+            async def run_on_new_loop(operation) -> None:
+                def run() -> None:
+                    asyncio.run(operation())
+
+                await asyncio.to_thread(run)
+
+            async def list_voices_from_thread() -> None:
+                await tts.list_voices()
+
             with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
-                await asyncio.to_thread(asyncio.run, tts.list_voices())
+                await run_on_new_loop(list_voices_from_thread)
 
             async def open_session_from_thread() -> None:
                 tts.open_session()
 
             with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
-                await asyncio.to_thread(asyncio.run, open_session_from_thread())
+                await run_on_new_loop(open_session_from_thread)
+
+            async def read_state_from_thread() -> None:
+                _state = session.state
+
+            async def read_voice_from_thread() -> None:
+                _voice = session.voice
+
+            async def read_speed_from_thread() -> None:
+                _speed = session.speed
+
+            async def enter_session_from_thread() -> None:
+                await session.__aenter__()
+
+            async def exit_session_from_thread() -> None:
+                await session.__aexit__(None, None, None)
+
+            async def close_session_from_thread() -> None:
+                await session.close()
+
+            async def pause_session_from_thread() -> None:
+                await session.pause()
+
+            async def resume_session_from_thread() -> None:
+                await session.resume()
+
+            async def set_voice_from_thread() -> None:
+                await session.set_voice("alba")
+
+            async def set_speed_from_thread() -> None:
+                await session.set_speed(1.0)
+
+            async def collect_from_thread() -> None:
+                await session.collect("hello")
+
+            async def synthesize_from_thread() -> None:
+                session.synthesize("hello")
+
+            synthesize_iterator = session.synthesize("hello")
+
+            async def iterate_synthesize_from_thread() -> None:
+                async for _chunk in synthesize_iterator:
+                    pass
+
+            for operation in (
+                read_state_from_thread,
+                read_voice_from_thread,
+                read_speed_from_thread,
+                enter_session_from_thread,
+                exit_session_from_thread,
+                close_session_from_thread,
+                pause_session_from_thread,
+                resume_session_from_thread,
+                set_voice_from_thread,
+                set_speed_from_thread,
+                collect_from_thread,
+                synthesize_from_thread,
+                iterate_synthesize_from_thread,
+            ):
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaisesRegex(ComponentLifecycleError, "one event loop"):
+                        await run_on_new_loop(operation)
         finally:
             await tts.stop()
 
