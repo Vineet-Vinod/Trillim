@@ -1,1 +1,1 @@
-"""Quantize test package for unittest discovery."""
+"""Quantize tests."""
