@@ -206,11 +206,12 @@ class _ChatSession(ChatSession):
         await self.close()
 
     async def close(self) -> None:
-        """Close the session and cancel any active turn."""
+        """Cancel any active turn without closing the reusable session."""
         self._llm._require_owner_loop()
-        self._close_requested = True
-        self._state = _ChatSessionFSM.DONE
         task = self._active_task
+        if task is None and self._active_event_stream is None:
+            return
+        self._close_requested = True
         if task is asyncio.current_task():
             # generate() will observe _close_requested after yielding control.
             return
@@ -224,6 +225,8 @@ class _ChatSession(ChatSession):
         stream = self._active_event_stream
         if stream is not None:
             await stream.aclose()
+            self._rollback_messages()
+            self._state = _ChatSessionFSM.IDLE
 
     def append_message(self, role: str, content: str) -> None:
         """Append one validated role-bearing message."""
@@ -282,11 +285,11 @@ class _ChatSession(ChatSession):
                 if self._close_requested:
                     await event_stream.aclose()
                     self._rollback_messages()
-                    self._state = _ChatSessionFSM.DONE
+                    self._state = _ChatSessionFSM.IDLE
                     return
             if self._close_requested:
                 self._rollback_messages()
-                self._state = _ChatSessionFSM.DONE
+                self._state = _ChatSessionFSM.IDLE
                 return
             if self._messages[-1]["role"] != "assistant":
                 self._messages.append({"role": "assistant", "content": full_text})
@@ -313,7 +316,11 @@ class _ChatSession(ChatSession):
             if self._active_event_stream is not None:
                 await self._active_event_stream.aclose()
             self._rollback_messages()
-            self._state = _ChatSessionFSM.DONE
+            self._state = (
+                _ChatSessionFSM.IDLE
+                if self._close_requested
+                else _ChatSessionFSM.DONE
+            )
             raise
         except SearchAuthenticationError as exc:
             self._rollback_messages()
